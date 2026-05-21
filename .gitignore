@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 模型文件（太大不入库）
+models/
+
+# 向量库数据
+chroma_db/
+chroma_db_test/
+chroma_db_verify/
+
+# MinerU 输出
+output/
+output_new/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.log

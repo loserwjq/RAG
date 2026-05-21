@@ -1,0 +1,275 @@
+"""
+基于 MinerU content_list 的智能语义切块。
+
+策略（按优先级）：
+  1. 标题挂载 —— 识别 text_level 维护标题链，标题不单独成 chunk, 而是注入后续内容
+  2. 短块合并 —— 同页相邻短文本合并到接近 MAX 为止
+  3. 长块拆分 —— 超过 MAX 的单段按句子边界断开
+  4. 表格/公式 —— 保持完整不切割，挂载标题后独立成 chunk
+  5. 图片/图表 —— 跳过，保留原结构给下游管线
+
+输出格式：[{type, text, page_idx, bbox, ...}]
+兼容 DocumentParser._content_list_to_chunks 的后续 tokenize 流程。
+"""
+
+import re
+from typing import Any, Dict, List, Tuple
+
+# ── 切块参数 ──────────────────────────────────────────────
+MAX_CHUNK_CHARS = 800   # 超过此值按句子边界拆分
+
+# 可合并的文本块类型
+MERGEABLE_TYPES = {
+    "text", "header", "footer", "page_number", "aside_text",
+    "ref_text", "abstract", "list",
+}
+
+# 独立类型（挂载标题后整体输出，不参与文本合并）
+STANDALONE_TYPES = {"table", "equation", "code", "algorithm"}
+
+# 透传类型（不参与切块，原样保留给下游）
+PASSTHROUGH_TYPES = {"image", "chart", "seal"}
+
+
+def _count_chars(text: str) -> int:
+    """估算文本的 '有效字符数'（中文 1，英文 0.4，标点 0.6，空格不计）。"""
+    n = 0
+    for ch in text:
+        if '一' <= ch <= '鿿' or '㐀' <= ch <= '䶿':
+            n += 1
+        elif ch.isascii() and ch.isalpha():
+            n += 0.4
+        elif ch in (' ', '\t', '\n', '\r'):
+            continue
+        else:
+            n += 0.6
+    return max(int(n), 1)
+
+
+def _is_title(item: Dict) -> bool:
+    return bool(item.get("text_level", 0) and item["text_level"] > 0)
+
+
+def _get_text(item: Dict) -> str:
+    t = item.get("type", "text")
+    if t == "table":
+        caption = " ".join(_as_list(item.get("table_caption")))
+        body = item.get("table_body", "") or ""
+        return (caption + "\n" + body).strip() if caption else body.strip()
+    if t == "equation":
+        return item.get("text", "") or item.get("text_format", "") or ""
+    return (item.get("text") or "").strip()
+
+
+def _as_list(val) -> List[str]:
+    if isinstance(val, list):
+        return [str(v) for v in val if v]
+    if isinstance(val, str) and val.strip():
+        return [val.strip()]
+    return []
+
+
+# ── 句子拆分 ──────────────────────────────────────────────
+
+_SENT_SPLIT_RE = re.compile(r'(?<=[。！？.!?\n])\s*')
+
+
+def _split_long_text(text: str, max_chars: int) -> List[str]:
+    parts: List[str] = []
+    sentences = _SENT_SPLIT_RE.split(text)
+    current = ""
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if _count_chars(current + sent) <= max_chars:
+            current = current + sent if current else sent
+        else:
+            if current:
+                parts.append(current)
+            current = sent
+    if current:
+        parts.append(current)
+    if not parts:
+        for i in range(0, len(text), max_chars):
+            parts.append(text[i:i + max_chars])
+    return parts
+
+
+# ── 标题链 ─────────────────────────────────────────────────
+
+class _TitleStack:
+    """维护当前段落所属的标题上下文。标题不单独成 chunk，作为前缀注入内容。"""
+
+    def __init__(self) -> None:
+        self._chain: List[Tuple[int, str]] = []  # [(level, formatted_title)]
+
+    def push(self, level: int, text: str) -> None:
+        tag = "#" * max(1, min(level, 6))
+        formatted = f"{tag} {text}"
+        while self._chain and self._chain[-1][0] >= level:
+            self._chain.pop()
+        self._chain.append((level, formatted))
+
+    def prefix(self) -> str:
+        if not self._chain:
+            return ""
+        return "\n\n".join(t for _, t in self._chain)
+
+    def trailing_titles_chunk(self, page_idx: int, bbox: List[int]) -> Dict:
+        """文档末尾如果没有内容跟随，将残留标题链整体输出。"""
+        return {
+            "type": "text",
+            "text": self.prefix(),
+            "page_idx": page_idx,
+            "bbox": bbox,
+        }
+
+
+# ── 主入口 ─────────────────────────────────────────────────
+
+def chunk_content_list(
+    content_list: List[Dict[str, Any]],
+    max_chars: int = MAX_CHUNK_CHARS,
+) -> List[Dict[str, Any]]:
+    if not content_list:
+        return []
+
+    result: List[Dict] = []
+    titles = _TitleStack()
+
+    pending_items: List[Dict] = []
+    pending_chars: int = 0
+
+    # ── flush helpers ─────────────────────────────────────
+
+    def flush() -> None:
+        """将缓冲区中的文本块合并输出为一个 chunk。"""
+        nonlocal pending_items, pending_chars
+        if not pending_items:
+            return
+
+        merged = ""
+        page_idx = pending_items[0].get("page_idx", 0)
+        bbox = list(pending_items[0].get("bbox", [0, 0, 0, 0]))
+
+        for item in pending_items:
+            merged += _get_text(item) + "\n"
+            ibox = item.get("bbox", [0, 0, 0, 0])
+            if ibox:
+                bbox[0] = min(bbox[0], ibox[0])
+                bbox[1] = min(bbox[1], ibox[1])
+                bbox[2] = max(bbox[2], ibox[2])
+                bbox[3] = max(bbox[3], ibox[3])
+
+        merged = merged.strip()
+        prefix = titles.prefix()
+        content = f"{prefix}\n\n{merged}" if prefix else merged
+
+        result.append({
+            "type": "text", "text": content,
+            "page_idx": page_idx, "bbox": bbox,
+        })
+        pending_items.clear()
+        pending_chars = 0
+
+    def emit_split(text: str, page_idx: int, bbox: List[int]) -> None:
+        prefix = titles.prefix()
+        for part in _split_long_text(text, max_chars):
+            part = part.strip()
+            if not part:
+                continue
+            content = f"{prefix}\n\n{part}" if prefix else part
+            result.append({
+                "type": "text", "text": content,
+                "page_idx": page_idx, "bbox": bbox,
+            })
+
+    def emit_standalone(item: Dict) -> None:
+        body = _get_text(item)
+        prefix = titles.prefix()
+        content = f"{prefix}\n\n{body}" if prefix else body
+        new_item = {
+            "type": item.get("type"),
+            "text": content,
+            "page_idx": item.get("page_idx", 0),
+            "bbox": item.get("bbox", [0, 0, 0, 0]),
+        }
+        for f in ("table_body", "table_caption", "table_footnote",
+                   "img_path", "text_format", "html",
+                   "code_language", "list_items"):
+            if f in item:
+                new_item[f] = item[f]
+        result.append(new_item)
+
+    # ── 主循环 ────────────────────────────────────────────
+
+    last_title_for_trailing = None  # 跟踪最后一个标题，用于末尾兜底
+
+    for item in content_list:
+        item_type = item.get("type", "text")
+        page_idx = item.get("page_idx", 0)
+
+        # 图片/图表/印章：透传
+        if item_type in PASSTHROUGH_TYPES:
+            flush()
+            result.append(item)
+            last_title_for_trailing = None
+            continue
+
+        # 标题：不单独成 chunk，更新链作为后续内容的上下文
+        if _is_title(item):
+            flush()
+            level = item.get("text_level", 1)
+            titles.push(level, _get_text(item))
+            last_title_for_trailing = (page_idx, item.get("bbox", [0, 0, 0, 0]))
+            continue
+
+        # 独立类型
+        if item_type in STANDALONE_TYPES:
+            flush()
+            emit_standalone(item)
+            last_title_for_trailing = None
+            continue
+
+        # 可合并文本
+        if item_type in MERGEABLE_TYPES or item_type == "text":
+            text = _get_text(item)
+            if not text:
+                continue
+
+            item_chars = _count_chars(text)
+            last_title_for_trailing = None
+            same_page = (pending_items and
+                         pending_items[-1].get("page_idx") == page_idx)
+
+            if same_page and pending_chars + item_chars <= max_chars:
+                pending_items.append(item)
+                pending_chars += item_chars
+            else:
+                flush()
+                if item_chars > max_chars:
+                    emit_split(text, page_idx, item.get("bbox", [0, 0, 0, 0]))
+                else:
+                    pending_items.append(item)
+                    pending_chars = item_chars
+            continue
+
+        # 兜底：未知类型当文本
+        text = _get_text(item)
+        if text:
+            flush()
+            emit_split(text, item.get("page_idx", 0), item.get("bbox", [0, 0, 0, 0]))
+            last_title_for_trailing = None
+
+    flush()
+
+    # 如果文档以标题结尾（无后续内容），输出残留标题链
+    if last_title_for_trailing and not any(
+        c.get("type") == "text" and titles.prefix() in c.get("text", "")
+        for c in result[-3:] if c.get("type") == "text"
+    ):
+        pg, bb = last_title_for_trailing
+        result.append(titles.trailing_titles_chunk(pg, bb))
+
+    return result
