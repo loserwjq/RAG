@@ -70,7 +70,6 @@ function toInt(value) {
 function pageLabel(source) {
   const direct = toInt(source?.page_number)
   if (direct && direct > 0) return `第${direct}页`
-
   const pageIdx = toInt(source?.metadata?.page_idx)
   if (pageIdx === null || pageIdx < 0) return ''
   return `第${pageIdx + 1}页`
@@ -109,7 +108,7 @@ async function openSource(source) {
 <style scoped>
 .sources {
   margin-top: var(--space-2);
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-border);
   padding-top: var(--space-2);
 }
 
@@ -121,7 +120,7 @@ async function openSource(source) {
   background: none;
   font-size: var(--text-xs);
   color: var(--color-text-muted);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
   padding: 2px 0;
   transition: color var(--transition-fast);
@@ -129,18 +128,14 @@ async function openSource(source) {
   text-align: left;
 }
 
-.sources-toggle:hover {
-  color: var(--color-primary);
-}
+.sources-toggle:hover { color: var(--color-primary); }
 
 .chevron {
   margin-left: auto;
   transition: transform var(--transition-fast);
 }
 
-.chevron.rotated {
-  transform: rotate(180deg);
-}
+.chevron.rotated { transform: rotate(180deg); }
 
 .sources-list {
   margin-top: var(--space-2);
@@ -155,7 +150,7 @@ async function openSource(source) {
   padding: var(--space-2) var(--space-3);
   background: var(--color-bg-alt);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-border);
 }
 
 .source-header {
@@ -167,10 +162,7 @@ async function openSource(source) {
   flex-wrap: wrap;
 }
 
-.source-idx {
-  color: var(--color-accent);
-  font-weight: var(--font-semibold);
-}
+.source-idx { color: var(--color-primary); font-weight: var(--font-semibold); }
 
 .source-doc {
   display: flex;
@@ -188,16 +180,14 @@ async function openSource(source) {
   font-size: 10px;
 }
 
-.source-spacer {
-  flex: 1 1 auto;
-}
+.source-spacer { flex: 1 1 auto; }
 
 .source-open {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   color: var(--color-primary);
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
   border: 1px solid var(--color-primary-200);
   border-radius: 3px;
   padding: 1px 6px;
@@ -208,13 +198,13 @@ async function openSource(source) {
 }
 
 .source-open:hover {
-  background: var(--color-primary);
-  color: var(--color-text-inverse);
-  border-color: var(--color-primary);
+  background: var(--color-primary-100);
+  color: var(--color-primary);
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.1);
 }
 
 .source-score {
-  color: var(--color-primary-400);
+  color: var(--color-primary-500);
   font-weight: var(--font-semibold);
   font-size: 10px;
 }

@@ -48,9 +48,11 @@
 
     <!-- 空状态 -->
     <div v-else-if="kbs.length === 0" class="empty-state">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-      </svg>
+      <div class="empty-icon-glow">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.5">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
       <p>暂无知识库</p>
       <p class="hint">点击「新建知识库」创建第一个知识库</p>
     </div>
@@ -62,11 +64,16 @@
         :key="kb.id"
         class="kb-card"
         :class="{ expanded: expandedKb === kb.id }"
+        :ref="el => setCardRef(kb.id, el)"
+        @mousemove="e => onCardMouseMove(kb.id, e)"
+        @mouseenter="e => onCardMouseEnter(kb.id, e)"
+        @mouseleave="e => onCardMouseLeave(kb.id, e)"
+        @click="e => onCardClick(kb.id, e)"
       >
         <!-- 卡片头部 -->
         <div class="kb-card-header" @click="expandedKb = expandedKb === kb.id ? null : kb.id">
           <div class="kb-card-left">
-            <div class="kb-icon">
+            <div class="kb-icon" :ref="el => setIconRef(kb.id, el)">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
               </svg>
@@ -103,7 +110,6 @@
 
         <!-- 展开详情 -->
         <div v-if="expandedKb === kb.id" class="kb-card-detail">
-          <!-- 描述和操作 -->
           <div class="detail-section">
             <div class="detail-info">
               <span v-if="kb.description" class="kb-desc">{{ kb.description }}</span>
@@ -118,7 +124,6 @@
 
           <div class="divider"></div>
 
-          <!-- 成员管理 -->
           <div class="members-section">
             <h4>成员管理</h4>
             <div class="member-list">
@@ -139,7 +144,6 @@
               </div>
             </div>
 
-            <!-- 添加成员 -->
             <div class="add-member">
               <select
                 :value="getAddForm(kb.id, 'userId')"
@@ -171,6 +175,12 @@
             </div>
           </div>
         </div>
+
+        <!-- 光晕 overlay -->
+        <div class="card-glow-overlay" :ref="el => setGlowRef(kb.id, el)"></div>
+
+        <!-- 涟漪容器 -->
+        <div class="ripple-container" :ref="el => setRippleRef(kb.id, el)"></div>
       </div>
     </div>
 
@@ -200,8 +210,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { kb as kbApi, users as usersApi, getUserInfo } from '../api.js'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import gsap from 'gsap'
+import { kb as kbApi, users as usersApi } from '../api.js'
 
 const props = defineProps({ userInfo: Object })
 const emit = defineEmits(['refresh-kbs'])
@@ -221,9 +232,23 @@ const removingMember = ref(null)
 const form = reactive({ name: '', department: 'dev', description: '' })
 const addMemberForm = reactive({})
 
+// ── 交互引用 ──
+const cardRefs = {}
+const iconRefs = {}
+const glowRefs = {}
+const rippleRefs = {}
+const floatTweens = {}
+const idleFloatTimers = {}
+
+function setCardRef(id, el) { if (el) cardRefs[id] = el }
+function setIconRef(id, el) { if (el) iconRefs[id] = el }
+function setGlowRef(id, el) { if (el) glowRefs[id] = el }
+function setRippleRef(id, el) { if (el) rippleRefs[id] = el }
+
 const deptMap = { dev: '开发部', test: '测试部', product: '产品部' }
 function deptName(d) { return deptMap[d] || d }
 
+// ── 数据加载 ──
 async function loadKbs() {
   loading.value = true
   try {
@@ -232,6 +257,8 @@ async function loadKbs() {
       ...kb,
       _members: kb.members || [],
     }))
+    await nextTick()
+    startIdleFloats()
   } catch (e) {
     error.value = '加载知识库失败: ' + e.message
   } finally {
@@ -251,16 +278,261 @@ onMounted(() => {
   loadUsers()
 })
 
+// ── 新建表单动画 ──
+watch(showCreate, async (val) => {
+  await nextTick()
+  const formEl = document.querySelector('.create-card')
+  if (!formEl) return
+  if (val) {
+    gsap.fromTo(formEl,
+      { y: -30, opacity: 0, scale: 0.95, filter: 'blur(4px)' },
+      { y: 0, opacity: 1, scale: 1, filter: 'blur(0px)', duration: 0.35, ease: 'back.out(1.4)' }
+    )
+  } else {
+    gsap.to(formEl, { y: -15, opacity: 0, scale: 0.95, duration: 0.2, ease: 'power2.in' })
+  }
+})
+
+onUnmounted(() => {
+  // 清理所有 GSAP 动画
+  Object.values(floatTweens).forEach(t => t?.kill())
+  Object.values(idleFloatTimers).forEach(t => clearTimeout(t))
+})
+
+// ── ═══════════════════════════════════════════════════════
+//   GSAP 交互效果
+// ═══════════════════════════════════════════════════════════
+
+/* --- 空闲浮动动画 --- */
+function startIdleFloats() {
+  kbs.value.forEach((kb, i) => {
+    const card = cardRefs[kb.id]
+    if (!card) return
+    // 先清除旧动画
+    floatTweens[kb.id]?.kill()
+    // 轻微浮动
+    floatTweens[kb.id] = gsap.to(card, {
+      y: 'random(-3, 3)',
+      x: 'random(-2, 2)',
+      duration: 'random(2.5, 4)',
+      repeat: -1,
+      yoyo: true,
+      ease: 'sine.inOut',
+      delay: i * 0.08,
+    })
+  })
+}
+
+/* --- 鼠标进入卡片 --- */
+function onCardMouseEnter(kbId, e) {
+  const card = cardRefs[kbId]
+  const icon = iconRefs[kbId]
+  const glow = glowRefs[kbId]
+  if (!card) return
+
+  // 停止浮动
+  floatTweens[kbId]?.kill()
+  gsap.to(card, { x: 0, y: 0, duration: 0.2 })
+
+  // 卡片发光
+  gsap.to(card, {
+    borderColor: 'rgba(0,255,136,0.4)',
+    boxShadow: '0 0 20px rgba(0,255,136,0.1), 0 0 40px rgba(0,255,136,0.04)',
+    scale: 1.015,
+    duration: 0.3,
+    ease: 'power2.out',
+  })
+
+  // 图标旋转 + 发光
+  if (icon) {
+    gsap.to(icon, {
+      rotation: 12,
+      scale: 1.1,
+      boxShadow: '0 0 16px rgba(0,255,136,0.3)',
+      duration: 0.3,
+      ease: 'back.out(1.7)',
+    })
+  }
+
+  // 光晕 overlay
+  if (glow) {
+    gsap.to(glow, { opacity: 1, duration: 0.3 })
+  }
+}
+
+/* --- 鼠标在卡片上移动 — 3D 倾斜 + 光晕跟随 --- */
+function onCardMouseMove(kbId, e) {
+  const card = cardRefs[kbId]
+  const glow = glowRefs[kbId]
+  if (!card) return
+
+  const rect = card.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  const centerX = rect.width / 2
+  const centerY = rect.height / 2
+
+  // 3D 倾斜
+  const rotateX = ((y - centerY) / centerY) * -5
+  const rotateY = ((x - centerX) / centerX) * 5
+
+  gsap.to(card, {
+    rotateX: rotateX,
+    rotateY: rotateY,
+    duration: 0.4,
+    ease: 'power2.out',
+  })
+
+  // 光晕跟随鼠标
+  if (glow) {
+    const percentX = (x / rect.width) * 100
+    const percentY = (y / rect.height) * 100
+    glow.style.background = `radial-gradient(circle at ${percentX}% ${percentY}%, rgba(0,255,136,0.12) 0%, transparent 50%)`
+  }
+}
+
+/* --- 鼠标离开卡片 --- */
+function onCardMouseLeave(kbId, e) {
+  const card = cardRefs[kbId]
+  const icon = iconRefs[kbId]
+  const glow = glowRefs[kbId]
+  if (!card) return
+
+  // 恢复
+  gsap.to(card, {
+    borderColor: 'var(--color-border)',
+    boxShadow: 'none',
+    scale: 1,
+    rotateX: 0,
+    rotateY: 0,
+    duration: 0.4,
+    ease: 'power2.out',
+  })
+
+  if (icon) {
+    gsap.to(icon, {
+      rotation: 0,
+      scale: 1,
+      boxShadow: 'none',
+      duration: 0.3,
+      ease: 'power2.out',
+    })
+  }
+
+  if (glow) {
+    gsap.to(glow, { opacity: 0, duration: 0.4 })
+  }
+
+  // 重新开始浮动 (延迟一下)
+  idleFloatTimers[kbId] = setTimeout(() => {
+    if (cardRefs[kbId]) {
+      floatTweens[kbId] = gsap.to(cardRefs[kbId], {
+        y: 'random(-3, 3)',
+        x: 'random(-2, 2)',
+        duration: 'random(3, 5)',
+        repeat: -1,
+        yoyo: true,
+        ease: 'sine.inOut',
+      })
+    }
+  }, 500)
+}
+
+/* --- 点击涟漪 --- */
+function onCardClick(kbId, e) {
+  const ripple = rippleRefs[kbId]
+  if (!ripple) return
+
+  const rect = ripple.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+
+  const dot = document.createElement('div')
+  dot.className = 'ripple-dot'
+  dot.style.left = x + 'px'
+  dot.style.top = y + 'px'
+  ripple.appendChild(dot)
+
+  gsap.fromTo(dot,
+    { scale: 0, opacity: 1 },
+    {
+      scale: 3,
+      opacity: 0,
+      duration: 0.6,
+      ease: 'power2.out',
+      onComplete: () => dot.remove(),
+    }
+  )
+
+  // 小粒子爆发
+  for (let i = 0; i < 8; i++) {
+    const spark = document.createElement('div')
+    spark.className = 'ripple-spark'
+    spark.style.left = x + 'px'
+    spark.style.top = y + 'px'
+    ripple.appendChild(spark)
+
+    const angle = (i / 8) * Math.PI * 2
+    const dist = 15 + Math.random() * 20
+
+    gsap.fromTo(spark,
+      { x: 0, y: 0, scale: 1, opacity: 0.8 },
+      {
+        x: Math.cos(angle) * dist,
+        y: Math.sin(angle) * dist,
+        scale: 0,
+        opacity: 0,
+        duration: 0.4 + Math.random() * 0.3,
+        ease: 'power2.out',
+        onComplete: () => spark.remove(),
+      }
+    )
+  }
+}
+
+// ── KB 操作 ──
 async function createKb() {
   creating.value = true
   error.value = ''
   try {
-    await kbApi.create(form.name, form.department, form.description)
+    const result = await kbApi.create(form.name, form.department, form.description)
     showCreate.value = false
     form.name = ''
     form.description = ''
     await loadKbs()
     emit('refresh-kbs')
+
+    // 庆祝动画 — 找到新卡片并播放入场特效
+    await nextTick()
+    const newCard = document.querySelector('.kb-card:first-child')
+    if (newCard) {
+      // 粒子爆发
+      spawnCelebration(newCard)
+      // 卡片滑入 + 光晕脉冲
+      gsap.fromTo(newCard,
+        { y: -60, opacity: 0, scale: 0.9, boxShadow: '0 0 40px rgba(0,255,136,0.5)' },
+        {
+          y: 0, opacity: 1, scale: 1,
+          duration: 0.6,
+          ease: 'back.out(1.4)',
+          onComplete: () => {
+            gsap.to(newCard, {
+              boxShadow: '0 0 0px rgba(0,255,136,0)',
+              duration: 0.8,
+              ease: 'power2.out',
+            })
+          }
+        }
+      )
+      // 图标脉冲
+      const icon = newCard.querySelector('.kb-icon')
+      if (icon) {
+        gsap.fromTo(icon,
+          { scale: 0, rotation: -180 },
+          { scale: 1, rotation: 0, duration: 0.5, delay: 0.2, ease: 'back.out(2)' }
+        )
+      }
+    }
   } catch (e) {
     error.value = e.message
   } finally {
@@ -268,9 +540,74 @@ async function createKb() {
   }
 }
 
-function confirmDelete(kb) {
-  deleteTarget.value = kb
+// ── 庆祝粒子 ──
+function spawnCelebration(targetEl) {
+  const rect = targetEl.getBoundingClientRect()
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+  const count = 30
+
+  for (let i = 0; i < count; i++) {
+    const spark = document.createElement('div')
+    spark.style.cssText = `
+      position: fixed;
+      left: ${cx}px;
+      top: ${cy}px;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: ${i % 3 === 0 ? '#00d4ff' : '#00ff88'};
+      box-shadow: 0 0 6px ${i % 3 === 0 ? 'rgba(0,212,255,0.8)' : 'rgba(0,255,136,0.8)'};
+      pointer-events: none;
+      z-index: 100;
+    `
+    document.body.appendChild(spark)
+
+    const angle = (i / count) * Math.PI * 2
+    const dist = 40 + Math.random() * 120
+    const duration = 0.5 + Math.random() * 0.8
+
+    gsap.fromTo(spark,
+      { x: 0, y: 0, scale: 1, opacity: 1 },
+      {
+        x: Math.cos(angle) * dist,
+        y: Math.sin(angle) * dist - 30,
+        scale: 0,
+        opacity: 0,
+        duration,
+        ease: 'power2.out',
+        onComplete: () => spark.remove(),
+      }
+    )
+  }
+
+  // 中心光环
+  const ring = document.createElement('div')
+  ring.style.cssText = `
+    position: fixed;
+    left: ${cx}px;
+    top: ${cy}px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid rgba(0,255,136,0.6);
+    pointer-events: none;
+    z-index: 100;
+    transform: translate(-50%, -50%);
+  `
+  document.body.appendChild(ring)
+
+  gsap.fromTo(ring,
+    { width: 10, height: 10, marginLeft: -5, marginTop: -5, opacity: 1 },
+    {
+      width: 300, height: 300, marginLeft: -150, marginTop: -150,
+      opacity: 0, duration: 0.8, ease: 'power2.out',
+      onComplete: () => ring.remove(),
+    }
+  )
 }
+
+function confirmDelete(kb) { deleteTarget.value = kb }
 
 async function doDelete() {
   const kb = deleteTarget.value
@@ -322,11 +659,7 @@ async function loadKbDetail(kbId) {
     const data = await kbApi.get(kbId)
     const idx = kbs.value.findIndex(k => k.id === kbId)
     if (idx >= 0) {
-      kbs.value[idx] = {
-        ...kbs.value[idx],
-        ...data,
-        _members: data.members || [],
-      }
+      kbs.value[idx] = { ...kbs.value[idx], ...data, _members: data.members || [] }
     }
   } catch (e) { /* ignore */ }
 }
@@ -338,10 +671,7 @@ function ensureForm(kbId) {
   return addMemberForm[kbId]
 }
 
-function getAddForm(kbId, field) {
-  return ensureForm(kbId)[field]
-}
-
+function getAddForm(kbId, field) { return ensureForm(kbId)[field] }
 function setAddForm(kbId, field, value) {
   const f = ensureForm(kbId)
   f[field] = value
@@ -360,9 +690,7 @@ function setAddForm(kbId, field, value) {
 
 /* ═══ Toolbar ═════════════════════════════════════════════ */
 
-.panel-toolbar {
-  margin-bottom: var(--space-4);
-}
+.panel-toolbar { margin-bottom: var(--space-4); }
 
 .btn {
   display: inline-flex;
@@ -371,51 +699,53 @@ function setAddForm(kbId, field, value) {
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-  font-weight: var(--font-medium);
-  font-family: inherit;
+  font-weight: var(--font-semibold);
+  font-family: var(--font-family);
   cursor: pointer;
   transition: all var(--transition-fast);
   border: 1px solid transparent;
 }
 
 .btn--primary {
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--color-primary-100);
+  color: var(--color-primary);
+  border-color: var(--color-primary-200);
 }
 
 .btn--primary:hover {
-  background: var(--color-primary-hover);
+  background: var(--color-primary-200);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.15);
 }
 
 .btn--primary:disabled {
-  background: var(--color-text-muted);
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .btn--primary-sm {
   padding: 4px 10px;
-  background: var(--color-primary);
-  color: #fff;
-  border: none;
+  background: var(--color-primary-100);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary-200);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
 }
 
 .btn--primary-sm:disabled {
-  background: var(--color-text-muted);
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .btn--danger-sm {
   padding: 4px 10px;
-  background: var(--color-surface);
+  background: transparent;
   color: var(--color-danger);
   border: 1px solid var(--color-danger-light);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
@@ -429,13 +759,14 @@ function setAddForm(kbId, field, value) {
 }
 
 .btn--secondary {
-  background: var(--color-surface);
+  background: transparent;
   border-color: var(--color-border);
   color: var(--color-text-secondary);
 }
 
 .btn--secondary:hover {
-  background: var(--color-bg-alt);
+  border-color: var(--color-border-light);
+  color: var(--color-text);
 }
 
 .btn--danger {
@@ -444,7 +775,7 @@ function setAddForm(kbId, field, value) {
 }
 
 .btn--danger:hover:not(:disabled) {
-  background: var(--color-seal-red, #a03028);
+  box-shadow: 0 0 12px rgba(255, 51, 85, 0.3);
 }
 
 .btn--danger:disabled {
@@ -456,7 +787,7 @@ function setAddForm(kbId, field, value) {
 
 .create-card {
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-glow);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   margin-bottom: var(--space-4);
@@ -464,14 +795,8 @@ function setAddForm(kbId, field, value) {
 }
 
 @keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .form-row {
@@ -480,13 +805,8 @@ function setAddForm(kbId, field, value) {
   margin-bottom: var(--space-3);
 }
 
-.form-row .form-field {
-  flex: 1;
-}
-
-.form-field {
-  margin-bottom: var(--space-3);
-}
+.form-row .form-field { flex: 1; }
+.form-field { margin-bottom: var(--space-3); }
 
 .form-field label {
   display: block;
@@ -504,18 +824,18 @@ function setAddForm(kbId, field, value) {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-  font-family: inherit;
+  font-family: var(--font-family);
   color: var(--color-text);
-  background: var(--color-surface);
+  background: var(--color-bg-alt);
   outline: none;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition: all var(--transition-fast);
 }
 
 .form-field input:focus,
 .form-field select:focus,
 .form-select:focus {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-100);
+  border-color: var(--color-primary-400);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.1);
 }
 
 .form-select--sm {
@@ -530,45 +850,32 @@ function setAddForm(kbId, field, value) {
   gap: var(--space-3);
 }
 
-.form-error {
-  font-size: var(--text-xs);
-  color: var(--color-danger);
-}
+.form-error { font-size: var(--text-xs); color: var(--color-danger); }
 
 /* ═══ Loading / Empty ════════════════════════════════════ */
 
-.loading-state {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
+.loading-state { display: flex; flex-direction: column; gap: var(--space-3); }
 
 .skeleton {
   padding: var(--space-4);
   background: var(--color-surface);
   border-radius: var(--radius-md);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-border);
 }
 
 .skeleton-line {
   height: 12px;
-  background: var(--color-border);
+  background: var(--color-border-light);
   border-radius: 3px;
   animation: shimmer 1.5s ease-in-out infinite;
 }
 
-.skeleton-line--title {
-  width: 40%;
-  margin-bottom: 8px;
-}
-
-.skeleton-line--detail {
-  width: 60%;
-}
+.skeleton-line--title { width: 40%; margin-bottom: 8px; }
+.skeleton-line--detail { width: 60%; }
 
 @keyframes shimmer {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.7; }
 }
 
 .empty-state {
@@ -581,8 +888,9 @@ function setAddForm(kbId, field, value) {
   font-size: var(--text-sm);
 }
 
-.empty-state svg {
-  margin-bottom: var(--space-3);
+.empty-icon-glow {
+  margin-bottom: var(--space-4);
+  filter: drop-shadow(0 0 8px rgba(0, 255, 136, 0.2));
 }
 
 .empty-state .hint {
@@ -600,28 +908,66 @@ function setAddForm(kbId, field, value) {
 }
 
 .kb-card {
+  position: relative;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  transition: all var(--transition-fast);
+  transition: none; /* GSAP handles transitions */
+  transform-style: preserve-3d;
+  perspective: 800px;
 }
 
-.kb-card:hover {
-  box-shadow: var(--shadow-sm);
+.card-glow-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
+}
+
+.ripple-container {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+}
+
+.ripple-dot {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0,255,136,0.6) 0%, transparent 70%);
+  transform: translate(-50%, -50%);
+}
+
+.ripple-spark {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 4px var(--glow-green);
+  transform: translate(-50%, -50%);
 }
 
 .kb-card-header {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   cursor: pointer;
+  background: var(--color-surface);
   transition: background var(--transition-fast);
 }
 
 .kb-card-header:hover {
-  background: var(--color-bg-alt);
+  background: var(--color-surface-hover);
 }
 
 .kb-card-left {
@@ -636,17 +982,16 @@ function setAddForm(kbId, field, value) {
   width: 40px;
   height: 40px;
   border-radius: var(--radius-md);
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
   color: var(--color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: none;
 }
 
-.kb-card-info {
-  min-width: 0;
-}
+.kb-card-info { min-width: 0; }
 
 .kb-name {
   font-size: var(--text-sm);
@@ -680,8 +1025,8 @@ function setAddForm(kbId, field, value) {
 .dept-tag {
   font-size: 10px;
   padding: 1px 6px;
-  background: var(--color-primary-light);
-  color: var(--color-primary-600);
+  background: var(--color-primary-50);
+  color: var(--color-primary);
   border-radius: var(--radius-full);
   font-weight: var(--font-medium);
 }
@@ -692,14 +1037,14 @@ function setAddForm(kbId, field, value) {
   flex-shrink: 0;
 }
 
-.expand-icon.rotated {
-  transform: rotate(180deg);
-}
+.expand-icon.rotated { transform: rotate(180deg); }
 
 /* ═══ KB Detail ══════════════════════════════════════════ */
 
 .kb-card-detail {
-  border-top: 1px solid var(--color-border-light);
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid var(--color-border);
   background: var(--color-bg-alt);
   padding: var(--space-4);
   animation: slideDown 0.2s ease-out;
@@ -718,23 +1063,15 @@ function setAddForm(kbId, field, value) {
   gap: 4px;
 }
 
-.kb-desc {
-  font-size: var(--text-xs);
-  color: var(--color-text-secondary);
-}
-
-.kb-ctime {
-  font-size: 10px;
-  color: var(--color-text-muted);
-}
+.kb-desc { font-size: var(--text-xs); color: var(--color-text-secondary); }
+.kb-ctime { font-size: 10px; color: var(--color-text-muted); }
 
 .divider {
   height: 1px;
-  background: var(--color-border-light);
+  background: var(--color-border);
   margin: var(--space-3) 0;
 }
 
-/* Members */
 .members-section h4 {
   font-size: var(--text-xs);
   font-weight: var(--font-semibold);
@@ -762,25 +1099,18 @@ function setAddForm(kbId, field, value) {
   width: 24px;
   height: 24px;
   border-radius: var(--radius-full);
-  background: var(--color-primary-light);
-  color: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent) 100%);
+  color: var(--color-text-inverse);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 10px;
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-bold);
   flex-shrink: 0;
 }
 
-.member-name {
-  font-weight: var(--font-medium);
-  color: var(--color-text);
-}
-
-.member-dept {
-  color: var(--color-text-muted);
-  font-size: 10px;
-}
+.member-name { font-weight: var(--font-medium); color: var(--color-text); }
+.member-dept { color: var(--color-text-muted); font-size: 10px; }
 
 .perm-tag {
   margin-left: auto;
@@ -791,7 +1121,7 @@ function setAddForm(kbId, field, value) {
 }
 
 .perm--read { background: var(--color-surface-secondary); color: var(--color-text-muted); }
-.perm--write { background: var(--color-warning-light); color: #6b5010; }
+.perm--write { background: var(--color-warning-light); color: var(--color-warning); }
 .perm--admin { background: var(--color-danger-light); color: var(--color-danger); }
 
 .icon-btn--sm {
@@ -799,7 +1129,7 @@ function setAddForm(kbId, field, value) {
   height: 22px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  background: var(--color-surface);
+  background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
   display: flex;
@@ -813,10 +1143,7 @@ function setAddForm(kbId, field, value) {
   color: var(--color-danger);
 }
 
-.icon-btn--sm:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
+.icon-btn--sm:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .add-member {
   display: flex;
@@ -829,8 +1156,8 @@ function setAddForm(kbId, field, value) {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(26, 24, 20, 0.4);
-  backdrop-filter: blur(4px);
+  background: rgba(4, 4, 10, 0.7);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -840,11 +1167,12 @@ function setAddForm(kbId, field, value) {
 
 .modal-card {
   background: var(--color-surface);
+  border: 1px solid var(--color-border-glow);
   border-radius: var(--radius-xl);
   padding: var(--space-8);
   width: 400px;
   max-width: 90vw;
-  box-shadow: var(--shadow-xl);
+  box-shadow: var(--shadow-xl), 0 0 30px rgba(0, 255, 136, 0.05);
   text-align: center;
 }
 

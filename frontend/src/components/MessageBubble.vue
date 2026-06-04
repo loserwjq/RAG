@@ -27,9 +27,7 @@
 import { computed } from 'vue'
 import SourceCard from './SourceCard.vue'
 
-const props = defineProps({
-  message: Object,
-})
+const props = defineProps({ message: Object })
 
 const showSources = computed(() => {
   return props.message?.role === 'assistant' &&
@@ -63,31 +61,24 @@ const renderedContent = computed(() => {
   to { opacity: 1; transform: translateY(0); }
 }
 
-.bubble.user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
-}
-
-.bubble.assistant {
-  align-self: flex-start;
-}
+.bubble.user { align-self: flex-end; flex-direction: row-reverse; }
+.bubble.assistant { align-self: flex-start; }
 
 .bubble-avatar {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-full);
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
   color: var(--color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   margin-top: 2px;
+  border: 1px solid var(--color-primary-200);
 }
 
-.bubble-body {
-  min-width: 0;
-}
+.bubble-body { min-width: 0; }
 
 .bubble-header {
   display: flex;
@@ -97,20 +88,17 @@ const renderedContent = computed(() => {
   padding: 0 4px;
 }
 
-.bubble.user .bubble-header {
-  flex-direction: row-reverse;
-}
+.bubble.user .bubble-header { flex-direction: row-reverse; }
 
 .bubble-role {
   font-size: var(--text-xs);
   color: var(--color-text-muted);
   font-weight: var(--font-medium);
+  font-family: var(--font-display);
+  letter-spacing: 0.05em;
 }
 
-.bubble-time {
-  font-size: 10px;
-  color: var(--color-text-muted);
-}
+.bubble-time { font-size: 10px; color: var(--color-text-muted); }
 
 .bubble-content {
   padding: var(--space-3) var(--space-4);
@@ -124,8 +112,9 @@ const renderedContent = computed(() => {
 }
 
 .bubble.user .bubble-content {
-  background: var(--color-primary);
-  color: var(--color-text-inverse);
+  background: var(--color-primary-50);
+  color: var(--color-text);
+  border: 1px solid var(--color-primary-200);
   border-bottom-right-radius: var(--radius-sm);
 }
 
@@ -134,33 +123,25 @@ const renderedContent = computed(() => {
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-bottom-left-radius: var(--radius-sm);
-  box-shadow: var(--shadow-xs);
 }
 
 .text :deep(code) {
-  background: rgba(0, 0, 0, 0.05);
+  background: rgba(0, 255, 136, 0.08);
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 0.9em;
   font-family: var(--font-mono);
-  color: var(--color-primary-700);
+  color: var(--color-primary);
 }
 
-.bubble.user .text :deep(code) {
-  background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.text :deep(strong) {
-  font-weight: var(--font-semibold);
-}
+.text :deep(strong) { font-weight: var(--font-semibold); }
 
 .typing-cursor {
   display: inline-block;
   animation: blink 1s step-end infinite;
   font-weight: var(--font-light);
   margin-left: 1px;
-  color: var(--color-text-muted);
+  color: var(--color-primary);
 }
 
 @keyframes blink {

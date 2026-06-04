@@ -1,20 +1,23 @@
 <template>
-  <!-- ═══ 背景诗文 ═══ -->
-  <BackgroundPoems />
+  <!-- ═══ 赛博背景 ═══ -->
+  <CyberBackground />
 
-  <!-- ═══ 水墨画布特效 ═══ -->
-  <InkWashCanvas />
+  <!-- ═══ 启动动画 + 登录 ═══ -->
+  <SplashScreen v-if="!user" @logged-in="onLogin" />
 
-  <!-- ═══ 未登录 ═══ -->
-  <LoginPanel v-if="!user" @logged-in="onLogin" />
-
-  <!-- ═══ 已登录 ═══ -->
+  <!-- ═══ 主界面 ═══ -->
   <div v-else class="app-layout">
     <!-- 侧边栏 -->
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <div class="brand-icon">墨</div>
-        <span class="brand-name">雅集 · 知识库</span>
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="3"/>
+            <rect x="7" y="7" width="10" height="10" rx="1.5"/>
+            <circle cx="12" cy="12" r="2.5" fill="currentColor" opacity="0.4"/>
+          </svg>
+        </div>
+        <span class="brand-name">NEURAL<span class="brand-accent">KB</span></span>
       </div>
 
       <nav class="sidebar-nav">
@@ -78,30 +81,37 @@
         </div>
       </header>
 
-      <main class="content-area">
-        <ChatPanel v-show="activeTab === 'chat'" :key="'chat-' + kbsKey" :kbs="kbs" />
-        <DocumentsPanel v-show="activeTab === 'docs'" :key="'docs-' + kbsKey" :kbs="kbs" @refresh-kbs="loadKbs" />
-        <KBPanel v-show="activeTab === 'kb'" :key="'kb-' + kbsKey" :user-info="user" @refresh-kbs="loadKbs" />
+      <main class="content-area" ref="contentAreaRef">
+        <!-- 扫描线 -->
+        <div class="scan-line" ref="scanLineRef"></div>
+
+        <Transition mode="out-in" @before-enter="onTabBeforeEnter" @enter="onTabEnter" @leave="onTabLeave">
+          <ChatPanel v-if="activeTab === 'chat'" :key="'chat-' + kbsKey" :kbs="kbs" />
+          <DocumentsPanel v-else-if="activeTab === 'docs'" :key="'docs-' + kbsKey" :kbs="kbs" @refresh-kbs="loadKbs" />
+          <KBPanel v-else :key="'kb-' + kbsKey" :user-info="user" @refresh-kbs="loadKbs" />
+        </Transition>
       </main>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import LoginPanel from './components/LoginPanel.vue'
+import { ref, computed, nextTick } from 'vue'
+import gsap from 'gsap'
+import SplashScreen from './components/SplashScreen.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import DocumentsPanel from './components/DocumentsPanel.vue'
 import KBPanel from './components/KBPanel.vue'
-import BackgroundPoems from './components/BackgroundPoems.vue'
-import InkWashCanvas from './components/InkWashCanvas.vue'
-import { setUser, getUserInfo, kb as kbApi } from './api.js'
+import CyberBackground from './components/CyberBackground.vue'
+import { setUser, kb as kbApi } from './api.js'
 
 const user = ref(null)
 const activeTab = ref('chat')
 const activeKbId = ref(null)
 const kbs = ref([])
 const kbsKey = ref(0)
+const contentAreaRef = ref(null)
+const scanLineRef = ref(null)
 
 const deptMap = { dev: '开发部', test: '测试部', product: '产品部' }
 function deptName(d) { return deptMap[d] || d }
@@ -110,6 +120,50 @@ const pageTitle = computed(() => {
   const titles = { chat: '知识库问答', docs: '文档管理', kb: '知识库管理' }
   return titles[activeTab.value] || ''
 })
+
+// ═══════════════════════════════════════════════════════════
+// Tab 切换 GSAP 动画 — 故障扫描线效果
+// ═══════════════════════════════════════════════════════════
+
+function onTabBeforeEnter(el) {
+  gsap.set(el, { opacity: 0, x: 40, filter: 'blur(8px)' })
+}
+
+function onTabEnter(el, done) {
+  gsap.to(el, {
+    opacity: 1,
+    x: 0,
+    filter: 'blur(0px)',
+    duration: 0.35,
+    ease: 'power2.out',
+    onComplete: done,
+  })
+}
+
+function onTabLeave(el, done) {
+  // 触发扫描线
+  const scanLine = scanLineRef.value
+  if (scanLine) {
+    gsap.fromTo(scanLine,
+      { top: '0%', opacity: 0.8 },
+      {
+        top: '100%',
+        duration: 0.25,
+        ease: 'power2.in',
+        onStart: () => gsap.set(scanLine, { opacity: 0.8 }),
+        onComplete: () => gsap.set(scanLine, { opacity: 0 }),
+      }
+    )
+  }
+
+  // 旧内容故障位移 + 闪白
+  gsap.timeline({ onComplete: done })
+    .to(el, { x: -15, duration: 0.08, ease: 'power2.in' })
+    .to(el, { x: 8, duration: 0.06, ease: 'power2.in' })
+    .to(el, { x: 0, opacity: 0, filter: 'blur(4px) brightness(2)', duration: 0.15, ease: 'power2.in' })
+}
+
+// ═══════════════════════════════════════════════════════════
 
 async function onLogin(userData) {
   user.value = userData
@@ -130,15 +184,32 @@ async function loadKbs() {
 }
 
 function logout() {
-  user.value = null
-  kbs.value = []
-  setUser(null)
+  const sidebar = document.querySelector('.sidebar')
+  const main = document.querySelector('.main-area')
+  if (sidebar && main) {
+    gsap.to([sidebar, main], {
+      opacity: 0,
+      y: 30,
+      duration: 0.3,
+      stagger: 0.05,
+      ease: 'power2.in',
+      onComplete: () => {
+        user.value = null
+        kbs.value = []
+        setUser(null)
+      }
+    })
+  } else {
+    user.value = null
+    kbs.value = []
+    setUser(null)
+  }
 }
 </script>
 
 <style scoped>
 /* ═══════════════════════════════════════════════════════════
-   App Layout — 水墨画风
+   App Layout — 赛博风格
    ═══════════════════════════════════════════════════════════ */
 
 .app-layout {
@@ -149,18 +220,44 @@ function logout() {
   background: transparent;
 }
 
+/* ═══ Tab Transition — 故障扫描线 ══════════════════════ */
+
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(0, 255, 136, 0.6) 20%,
+    rgba(0, 255, 136, 0.9) 50%,
+    rgba(0, 255, 136, 0.6) 80%,
+    transparent 100%
+  );
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.5), 0 0 30px rgba(0, 255, 136, 0.2);
+  pointer-events: none;
+  z-index: 10;
+  opacity: 0;
+}
+
 /* ═══ Sidebar ═════════════════════════════════════════════ */
 
 .sidebar {
   width: var(--sidebar-width);
-  background: rgba(250, 246, 239, 0.92);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 10, 22, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   z-index: var(--z-sidebar);
+  animation: slideInLeft 0.4s ease-out;
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 .sidebar-brand {
@@ -169,31 +266,33 @@ function logout() {
   align-items: center;
   gap: var(--space-3);
   padding: 0 var(--space-4);
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .brand-icon {
   width: 36px;
   height: 36px;
   border-radius: var(--radius-md);
-  background: var(--color-primary);
-  color: var(--color-text-inverse);
+  background: var(--color-primary-100);
+  color: var(--color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--font-display);
-  font-size: 20px;
-  font-weight: var(--font-bold);
   flex-shrink: 0;
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.15);
 }
 
 .brand-name {
-  font-size: var(--text-lg);
-  font-weight: var(--font-semibold);
-  color: var(--color-text);
-  white-space: nowrap;
   font-family: var(--font-display);
-  letter-spacing: 0.05em;
+  font-size: var(--text-lg);
+  font-weight: var(--font-bold);
+  color: var(--color-text);
+  letter-spacing: 0.08em;
+}
+
+.brand-accent {
+  color: var(--color-primary);
+  text-shadow: 0 0 8px var(--glow-green);
 }
 
 /* ═══ Navigation ══════════════════════════════════════════ */
@@ -217,7 +316,7 @@ function logout() {
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
   font-weight: var(--font-medium);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
   transition: all var(--transition-fast);
   text-align: left;
@@ -225,26 +324,27 @@ function logout() {
 }
 
 .nav-item:hover {
-  background: var(--color-surface-secondary);
+  background: var(--color-surface-hover);
   color: var(--color-text);
   border-color: var(--color-border-light);
 }
 
 .nav-item.active {
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
   color: var(--color-primary);
   border-color: var(--color-primary-200);
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.08);
 }
 
 .nav-item.active svg {
-  stroke: var(--color-primary);
+  filter: drop-shadow(0 0 4px rgba(0, 255, 136, 0.3));
 }
 
 /* ═══ Sidebar Footer ══════════════════════════════════════ */
 
 .sidebar-footer {
   padding: var(--space-3);
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-border);
 }
 
 .user-card {
@@ -253,20 +353,20 @@ function logout() {
   gap: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-md);
-  background: var(--color-bg-alt);
+  background: var(--color-surface-secondary);
 }
 
 .user-avatar {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-full);
-  background: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent) 100%);
   color: var(--color-text-inverse);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-bold);
   font-family: var(--font-display);
   flex-shrink: 0;
 }
@@ -294,8 +394,8 @@ function logout() {
 .dept-badge {
   font-size: 10px;
   padding: 1px 5px;
-  background: var(--color-primary-light);
-  color: var(--color-primary-600);
+  background: var(--color-primary-100);
+  color: var(--color-primary);
   border-radius: 3px;
   font-weight: var(--font-medium);
 }
@@ -312,7 +412,7 @@ function logout() {
 .logout-btn {
   width: 28px;
   height: 28px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
@@ -325,8 +425,9 @@ function logout() {
 }
 
 .logout-btn:hover {
-  background: var(--color-danger-light);
+  background: var(--color-danger-bg);
   color: var(--color-danger);
+  border-color: var(--color-danger-light);
 }
 
 /* ═══ Main Area ═══════════════════════════════════════════ */
@@ -337,14 +438,20 @@ function logout() {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  animation: fadeInUp 0.5s ease-out;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(15px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .top-bar {
   height: var(--header-height);
   padding: 0 var(--space-6);
-  background: rgba(250, 246, 239, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 10, 22, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--color-border);
   display: flex;
   align-items: center;
@@ -354,7 +461,7 @@ function logout() {
 
 .page-title {
   font-size: var(--text-xl);
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-bold);
   color: var(--color-text);
   font-family: var(--font-display);
   letter-spacing: 0.08em;
@@ -371,7 +478,7 @@ function logout() {
   align-items: center;
   gap: var(--space-2);
   padding: 4px 10px;
-  background: var(--color-bg-alt);
+  background: var(--color-surface-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
@@ -381,7 +488,7 @@ function logout() {
   background: transparent;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
   min-width: 120px;
   outline: none;

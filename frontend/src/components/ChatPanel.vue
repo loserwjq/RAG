@@ -64,7 +64,10 @@
           :key="i"
           :message="msg"
         />
-        <div v-if="loading" class="typing-hint">助手正在思考...</div>
+        <div v-if="loading" class="typing-hint">
+          <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+          助手正在思考
+        </div>
       </div>
 
       <div class="input-area">
@@ -95,12 +98,12 @@
 
     <!-- 删除确认 -->
     <div v-if="deleteTarget" class="modal-mask" @click.self="deleteTarget = null">
-      <div class="modal">
+      <div class="modal-card">
         <p class="modal-title">确认删除</p>
         <p>确定要删除对话「{{ deleteTarget.title }}」吗？此操作不可恢复。</p>
         <div class="modal-actions">
-          <button @click="deleteTarget = null">取消</button>
-          <button @click="doDelete" class="btn-danger" :disabled="deletingConv">
+          <button @click="deleteTarget = null" class="modal-btn">取消</button>
+          <button @click="doDelete" class="modal-btn modal-btn--danger" :disabled="deletingConv">
             {{ deletingConv ? '删除中...' : '确认删除' }}
           </button>
         </div>
@@ -111,6 +114,7 @@
 
 <script setup>
 import { ref, reactive, nextTick, onMounted } from 'vue'
+import gsap from 'gsap'
 import MessageBubble from './MessageBubble.vue'
 import { chatStream, conversations as convApi } from '../api.js'
 
@@ -134,9 +138,7 @@ const suggestedQuestions = [
   '这个系统支持哪些功能？',
 ]
 
-onMounted(() => {
-  loadConversations()
-})
+onMounted(() => { loadConversations() })
 
 async function loadConversations() {
   loadingConvs.value = true
@@ -177,6 +179,54 @@ async function newConversation() {
     })
     activeConvId.value = data.id
     messages.value = []
+
+    // 新对话入场动画
+    await nextTick()
+    const newConvEl = document.querySelector('.conv-item:first-child')
+    if (newConvEl) {
+      // 从左侧滑入 + 光晕脉冲
+      gsap.fromTo(newConvEl,
+        { x: -40, opacity: 0, backgroundColor: 'rgba(0,255,136,0.15)' },
+        {
+          x: 0, opacity: 1,
+          duration: 0.4,
+          ease: 'back.out(1.3)',
+          onComplete: () => {
+            gsap.to(newConvEl, {
+              backgroundColor: 'transparent',
+              duration: 0.6,
+              ease: 'power2.out',
+            })
+          }
+        }
+      )
+      // 标题文字闪烁
+      const titleEl = newConvEl.querySelector('.conv-title')
+      if (titleEl) {
+        gsap.fromTo(titleEl,
+          { color: '#00ff88', textShadow: '0 0 8px rgba(0,255,136,0.5)' },
+          { color: 'var(--color-text)', textShadow: 'none', duration: 0.6, delay: 0.2, ease: 'power2.out' }
+        )
+      }
+    }
+
+    // 输入框就绪脉冲
+    const textarea = inputRef.value
+    if (textarea) {
+      gsap.fromTo(textarea,
+        { borderColor: 'rgba(0,255,136,0.6)', boxShadow: '0 0 16px rgba(0,255,136,0.2)' },
+        { borderColor: 'var(--color-border)', boxShadow: 'none', duration: 0.6, delay: 0.3, ease: 'power2.out' }
+      )
+    }
+
+    // 空状态文字淡入
+    const emptyEl = document.querySelector('.empty-state')
+    if (emptyEl) {
+      gsap.fromTo(emptyEl,
+        { y: 20, opacity: 0 },
+        { y: 0, opacity: 1, duration: 0.4, delay: 0.15, ease: 'power2.out' }
+      )
+    }
   } catch (e) {
     console.error('创建对话失败:', e)
   }
@@ -197,33 +247,21 @@ function handleKeydown(e) {
   }
 }
 
-function sendSuggested(q) {
-  input.value = q
-  send()
-}
+function sendSuggested(q) { input.value = q; send() }
 
 function normalizeMessage(msg) {
   if (!msg) return msg
   if (typeof msg.sources === 'string') {
-    try {
-      return { ...msg, sources: JSON.parse(msg.sources || '[]') }
-    } catch {
-      return { ...msg, sources: [] }
-    }
+    try { return { ...msg, sources: JSON.parse(msg.sources || '[]') } }
+    catch { return { ...msg, sources: [] } }
   }
-  return {
-    ...msg,
-    sources: Array.isArray(msg.sources) ? msg.sources : [],
-  }
+  return { ...msg, sources: Array.isArray(msg.sources) ? msg.sources : [] }
 }
 
 async function send() {
   const text = input.value.trim()
   if (!text || loading.value) return
-
-  if (!activeConvId.value) {
-    await newConversation()
-  }
+  if (!activeConvId.value) await newConversation()
 
   messages.value.push({ role: 'user', content: text })
   input.value = ''
@@ -234,13 +272,7 @@ async function send() {
   loading.value = true
 
   try {
-    const stream = chatStream(
-      [{ role: 'user', content: text }],
-      null,
-      10,
-      activeConvId.value,
-    )
-
+    const stream = chatStream([{ role: 'user', content: text }], null, 10, activeConvId.value)
     for await (const payload of stream) {
       if (payload.type === 'token') {
         assistantMsg.content += payload.content
@@ -269,9 +301,7 @@ async function refreshConvList() {
   } catch (e) { /* ignore */ }
 }
 
-function confirmDelete(conv) {
-  deleteTarget.value = conv
-}
+function confirmDelete(conv) { deleteTarget.value = conv }
 
 async function doDelete() {
   const conv = deleteTarget.value
@@ -283,9 +313,7 @@ async function doDelete() {
     if (activeConvId.value === conv.id) {
       activeConvId.value = null
       messages.value = []
-      if (conversations.value.length > 0) {
-        await switchConversation(conversations.value[0].id)
-      }
+      if (conversations.value.length > 0) await switchConversation(conversations.value[0].id)
     }
     deleteTarget.value = null
   } catch (e) {
@@ -300,25 +328,19 @@ function formatDate(t) {
   const d = new Date(t)
   const now = new Date()
   const diff = now - d
-  if (diff < 86400000) {
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  }
+  if (diff < 86400000) return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 </script>
 
 <style scoped>
-.chat-layout {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
+.chat-layout { flex: 1; display: flex; overflow: hidden; }
 
 /* ── 侧边栏 ───────────────────────────────────────── */
 
 .chat-sidebar {
   width: 260px;
-  background: rgba(250, 246, 239, 0.7);
+  background: rgba(10, 10, 22, 0.8);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
@@ -326,15 +348,13 @@ function formatDate(t) {
   flex-shrink: 0;
 }
 
-.chat-sidebar.collapsed {
-  width: 48px;
-}
+.chat-sidebar.collapsed { width: 48px; }
 
 .sidebar-header {
   display: flex;
   gap: 4px;
   padding: 10px;
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .new-conv-btn {
@@ -344,10 +364,10 @@ function formatDate(t) {
   justify-content: center;
   gap: 6px;
   padding: 8px;
-  border: 1px solid var(--color-primary);
+  border: 1px solid var(--color-primary-200);
   border-radius: var(--radius-md);
-  background: var(--color-primary);
-  color: var(--color-text-inverse);
+  background: var(--color-primary-50);
+  color: var(--color-primary);
   font-size: var(--text-sm);
   font-family: var(--font-display);
   letter-spacing: 0.05em;
@@ -358,23 +378,22 @@ function formatDate(t) {
 }
 
 .new-conv-btn:hover {
-  background: var(--color-primary-hover);
+  background: var(--color-primary-100);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.1);
 }
 
 .toggle-sidebar {
   padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface);
+  background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
   flex-shrink: 0;
   transition: all var(--transition-fast);
 }
 
-.toggle-sidebar:hover {
-  color: var(--color-text);
-}
+.toggle-sidebar:hover { color: var(--color-text); border-color: var(--color-border-light); }
 
 .conv-list {
   flex: 1;
@@ -385,19 +404,8 @@ function formatDate(t) {
   gap: 2px;
 }
 
-.no-convs {
-  text-align: center;
-  padding: 30px 16px;
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-}
-
-.no-convs .hint {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  margin-top: 4px;
-  opacity: 0.7;
-}
+.no-convs { text-align: center; padding: 30px 16px; color: var(--color-text-muted); font-size: var(--text-sm); }
+.no-convs .hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 4px; opacity: 0.7; }
 
 .conv-item {
   display: flex;
@@ -409,12 +417,10 @@ function formatDate(t) {
   border: 1px solid transparent;
 }
 
-.conv-item:hover {
-  background: var(--color-surface-secondary);
-}
+.conv-item:hover { background: var(--color-surface-hover); }
 
 .conv-item.active {
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
   border-color: var(--color-primary-200);
 }
 
@@ -435,10 +441,7 @@ function formatDate(t) {
   white-space: nowrap;
 }
 
-.conv-meta {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-}
+.conv-meta { font-size: var(--text-xs); color: var(--color-text-muted); }
 
 .conv-delete {
   opacity: 0;
@@ -452,31 +455,15 @@ function formatDate(t) {
   transition: all var(--transition-fast);
 }
 
-.conv-item:hover .conv-delete {
-  opacity: 1;
-}
+.conv-item:hover .conv-delete { opacity: 1; }
 
-.conv-delete:hover {
-  color: var(--color-danger);
-  background: var(--color-danger-light);
-}
+.conv-delete:hover { color: var(--color-danger); background: var(--color-danger-bg); }
 
-.loading-convs {
-  text-align: center;
-  padding: 16px;
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-}
+.loading-convs { text-align: center; padding: 16px; color: var(--color-text-muted); font-size: var(--text-xs); }
 
 /* ── 主对话区 ─────────────────────────────────────── */
 
-.chat-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
+.chat-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
 .messages {
   flex: 1;
@@ -497,8 +484,10 @@ function formatDate(t) {
   color: var(--color-text-muted);
 }
 
-.empty-state p {
-  font-size: var(--text-base);
+.empty-state p { font-size: var(--text-base); }
+
+.empty-icon svg {
+  filter: drop-shadow(0 0 6px rgba(0,255,136,0.15));
 }
 
 .suggestions {
@@ -513,40 +502,55 @@ function formatDate(t) {
   padding: 6px 14px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
-  background: var(--color-surface);
+  background: transparent;
   font-size: var(--text-sm);
-  font-family: inherit;
+  font-family: var(--font-family);
   color: var(--color-text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 
 .suggestion-btn:hover {
-  border-color: var(--color-primary-300);
+  border-color: var(--color-primary-400);
   color: var(--color-primary);
-  background: var(--color-primary-light);
+  background: var(--color-primary-50);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.08);
 }
 
 .typing-hint {
   font-size: var(--text-xs);
   color: var(--color-text-muted);
   padding-left: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.typing-dots span {
+  display: inline-block;
+  animation: typingDot 1.4s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(1) { animation-delay: 0s; }
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typingDot {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; color: var(--color-primary); }
 }
 
 /* ── 输入区 ───────────────────────────────────────── */
 
 .input-area {
   padding: 12px 24px 16px;
-  background: rgba(250, 246, 239, 0.9);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 10, 22, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-top: 1px solid var(--color-border);
 }
 
-.input-row {
-  display: flex;
-  gap: 8px;
-}
+.input-row { display: flex; gap: 8px; }
 
 .input-row textarea {
   flex: 1;
@@ -556,29 +560,27 @@ function formatDate(t) {
   font-size: var(--text-base);
   resize: none;
   outline: none;
-  font-family: inherit;
+  font-family: var(--font-family);
   line-height: var(--leading-normal);
   min-height: 40px;
   max-height: 120px;
-  background: var(--color-surface);
+  background: var(--color-bg-alt);
   color: var(--color-text);
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition: all var(--transition-fast);
 }
 
-.input-row textarea::placeholder {
-  color: var(--color-text-muted);
-}
+.input-row textarea::placeholder { color: var(--color-text-muted); }
 
 .input-row textarea:focus {
   border-color: var(--color-primary-400);
-  box-shadow: 0 0 0 2px var(--color-primary-50);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.08);
 }
 
 .send-btn {
   padding: 8px 14px;
-  background: var(--color-primary);
-  color: var(--color-text-inverse);
-  border: none;
+  background: var(--color-primary-100);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary-200);
   border-radius: var(--radius-md);
   font-size: var(--text-base);
   cursor: pointer;
@@ -589,97 +591,65 @@ function formatDate(t) {
 }
 
 .send-btn:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  background: var(--color-primary-200);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.15);
 }
 
-.send-btn:disabled {
-  background: var(--color-border);
-  cursor: not-allowed;
-}
+.send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .send-spinner {
   width: 18px;
   height: 18px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid rgba(0, 255, 136, 0.2);
+  border-top-color: var(--color-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── 弹窗 ─────────────────────────────────────────── */
 
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(2px);
+  background: rgba(4, 4, 10, 0.6);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: var(--z-modal);
 }
 
-.modal {
+.modal-card {
   background: var(--color-surface);
+  border: 1px solid var(--color-border-glow);
   border-radius: var(--radius-lg);
   padding: 24px;
   width: 380px;
   max-width: 90vw;
-  border: 1px solid var(--color-border);
   box-shadow: var(--shadow-xl);
 }
 
-.modal-title {
-  font-size: var(--text-lg);
-  font-weight: var(--font-semibold);
-  color: var(--color-text);
-  margin-bottom: 8px;
-}
+.modal-title { font-size: var(--text-lg); font-weight: var(--font-semibold); color: var(--color-text); margin-bottom: 8px; }
+.modal-card p { color: var(--color-text-secondary); font-size: var(--text-sm); }
 
-.modal p {
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.modal-actions button {
+.modal-btn {
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
-  background: var(--color-surface);
+  background: transparent;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  font-family: inherit;
+  font-family: var(--font-family);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 
-.modal-actions button:hover {
-  background: var(--color-bg-alt);
-}
-
-.modal-actions .btn-danger {
-  border-color: var(--color-danger);
-  color: var(--color-danger);
-  background: var(--color-danger-bg);
-}
-
-.modal-actions .btn-danger:hover:not(:disabled) {
-  background: var(--color-danger);
-  color: #fff;
-}
-
-.modal-actions .btn-danger:disabled {
-  opacity: 0.5;
-}
+.modal-btn:hover { border-color: var(--color-border-light); color: var(--color-text); }
+.modal-btn--danger { border-color: var(--color-danger-light); color: var(--color-danger); background: var(--color-danger-bg); }
+.modal-btn--danger:hover:not(:disabled) { background: var(--color-danger); color: #fff; }
+.modal-btn--danger:disabled { opacity: 0.5; }
 </style>
