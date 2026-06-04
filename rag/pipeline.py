@@ -17,6 +17,8 @@ from rag.parser import get_parser
 from rag.chunker import Chunker, count_chars
 from rag.embedder import Embedder
 from rag.store import VectorStore
+from rag.reranker import Reranker
+from rag.llm import LLM, LLMError
 
 
 class Pipeline:
@@ -36,6 +38,8 @@ class Pipeline:
         self._chunker = Chunker(self._config.chunker)
         self._embedder = Embedder(self._config.embedder)
         self._store = VectorStore(self._config.store)
+        self._reranker = Reranker(self._config.reranker) if self._config.reranker.enabled else None
+        self._llm = LLM(self._config.llm)
 
     # ── 文档入库 ──────────────────────────────────────────
 
@@ -115,56 +119,94 @@ class Pipeline:
         query: str,
         top_k: int = None,
         alpha: float = None,
+        rerank: bool = True,
+        rewrite_query: bool = None,
     ) -> List[Dict[str, Any]]:
         """
-        混合检索: Dense + Sparse score-level 融合。
+        混合检索: (Query Rewriting) → Dense + Sparse 召回 → Reranker 精排。
 
         参数:
             query: 查询文本
-            top_k: 返回结果数（默认用配置值）
+            top_k: 最终返回结果数（默认用配置值）
             alpha: dense 权重（默认用配置值）
+            rerank: 是否使用 Reranker 重排（默认 True）
+            rewrite_query: 是否 LLM 改写问题（默认跟随配置）
 
-        返回: [{id, content, score, metadata, dense_score, sparse_score}]
+        返回: [{id, content, score, metadata, dense_score, sparse_score, rerank_score?}]
         """
         from rag.config import SearchConfig
 
-        # 编码 query
-        q = self._embedder.encode([query])
-        qd, qs = q["dense"][0], q["sparse"][0]
+        t_total = time.time()
+        final_top_k = top_k or self._config.search.top_k
 
-        # 构建检索配置
+        # Step 0: LLM Query Rewriting（修正拼写 + 扩展语义）
+        do_rewrite = rewrite_query if rewrite_query is not None else self._config.llm.rewrite_enabled
+        search_query = query
+        if do_rewrite:
+            t0 = time.time()
+            rewritten = self._llm.rewrite_query(query)
+            if rewritten and rewritten != query:
+                search_query = rewritten
+                print(f"[Pipeline.search] [timer]Query rewritten: \"{query}\" -> \"{rewritten}\" ({time.time() - t0:.2f}s)")
+
+        # 编码 query
+        t0 = time.time()
+        q = self._embedder.encode([search_query])
+        qd, qs = q["dense"][0], q["sparse"][0]
+        t_encode = time.time() - t0
+        print(f"[Pipeline.search] [timer]Query 编码: {t_encode:.2f}s")
+
+        # 初检：召回更多候选（reranker 需要更大候选集）
+        recall_k = final_top_k * 3 if (rerank and self._reranker) else final_top_k
         search_cfg = SearchConfig(
-            top_k=top_k or self._config.search.top_k,
+            top_k=recall_k,
             alpha=alpha if alpha is not None else self._config.search.alpha,
             candidate_multiplier=self._config.search.candidate_multiplier,
         )
 
-        return self._store.search(qd, qs, search_cfg)
+        t0 = time.time()
+        results = self._store.search(qd, qs, search_cfg)
+        t_search = time.time() - t0
+        print(f"[Pipeline.search] [timer]向量库检索: {t_search:.2f}s")
 
-    # ── 问答（预留接口，待接入 LLM）─────────────────────────
+        # Reranker 精排
+        if rerank and self._reranker and results:
+            t0 = time.time()
+            results = self._reranker.rerank_results(query, results, top_k=final_top_k)
+            t_rerank = time.time() - t0
+            print(f"[Pipeline.search] [timer]Reranker 精排: {t_rerank:.2f}s")
+        else:
+            results = results[:final_top_k]
+
+        print(f"[Pipeline.search] [timer]检索总耗时: {time.time() - t_total:.2f}s")
+        return results
+
+    # ── 问答 ──────────────────────────────────────────────
 
     def ask(
         self,
         question: str,
         top_k: int = 5,
         alpha: float = None,
+        stream: bool = False,
+        rewrite_query: bool = None,
     ) -> Dict[str, Any]:
         """
         检索增强问答 (RAG QA)。
 
-        流程: query → 检索 top_k → 构建 prompt → LLM 生成答案
+        流程: Query Rewriting → 检索 top_k → 构建上下文 → LLM 生成答案
 
         参数:
             question: 用户问题
             top_k: 检索文档数
             alpha: dense/sparse 权重
+            stream: 是否流式输出（True 时 answer 为 generator）
+            rewrite_query: 是否 LLM 改写问题（默认跟随配置）
 
         返回: {answer, sources: [{content, score, metadata}]}
-
-        TODO: 接入 LLM（OpenAI / 本地模型）
         """
         # Step 1: 检索相关文档
-        results = self.search(question, top_k=top_k, alpha=alpha)
+        results = self.search(question, top_k=top_k, alpha=alpha, rewrite_query=rewrite_query)
 
         if not results:
             return {
@@ -175,8 +217,14 @@ class Pipeline:
         # Step 2: 构建上下文
         context = self._build_context(results)
 
-        # Step 3: 生成答案（当前为占位实现）
-        answer = self._generate_answer(question, context)
+        # Step 3: LLM 生成答案
+        try:
+            if stream:
+                answer = self._llm.stream_with_context(question, context)
+            else:
+                answer = self._llm.answer_with_context(question, context)
+        except LLMError as e:
+            answer = f"[LLM 错误] {e}"
 
         return {
             "answer": answer,
@@ -191,33 +239,15 @@ class Pipeline:
         """将检索结果拼接为 LLM 上下文。"""
         parts = []
         for i, r in enumerate(results, 1):
-            parts.append(f"[文档{i}] (相关度: {r['score']:.3f})\n{r['content']}")
+            doc_name = r.get("metadata", {}).get("doc_name", f"文档{i}")
+            parts.append(f"[参考文档: {doc_name}] (相关度: {r['score']:.3f})\n{r['content']}")
         return "\n\n---\n\n".join(parts)
 
-    def _generate_answer(self, question: str, context: str) -> str:
-        """
-        LLM 生成答案（占位实现）。
+    # ── LLM 健康检查 ─────────────────────────────────────
 
-        TODO: 替换为实际 LLM 调用:
-            - OpenAI API (GPT-4 / GPT-3.5)
-            - 本地模型 (Qwen / ChatGLM / Llama)
-            - vLLM / Ollama 等推理框架
-        """
-        # 占位: 返回检索到的最相关内容摘要
-        prompt = f"""基于以下参考文档回答用户问题。如果文档中没有相关信息，请说明无法回答。
-
-参考文档:
-{context}
-
-用户问题: {question}
-
-请回答:"""
-
-        # TODO: 替换为 LLM 调用
-        # response = llm.generate(prompt)
-        # return response
-
-        return f"[待接入LLM] 已检索到相关文档，问题: {question}\n\n最相关内容:\n{context[:500]}..."
+    def check_llm(self) -> Dict[str, Any]:
+        """检查 LLM 服务状态。"""
+        return self._llm.check_health()
 
     # ── 工具方法 ──────────────────────────────────────────
 

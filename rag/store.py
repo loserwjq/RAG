@@ -3,8 +3,13 @@
 
 职责单一：向量的 CRUD 和相似度检索。
 异常隔离：ChromaDB 操作失败不影响上层逻辑。
+
+Sparse 向量通过 SQLite 持久化，重启后自动恢复。
 """
 
+import json
+import sqlite3
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -37,7 +42,7 @@ class VectorStore:
         self._client = None
         self._collection = None
         self._doc_sparse: Dict[str, Dict[int, float]] = {}
-        self._doc_text: Dict[str, str] = {}
+        self._sqlite_conn: Optional[sqlite3.Connection] = None
 
     # ── 惰性初始化 ────────────────────────────────────────
 
@@ -52,10 +57,28 @@ class VectorStore:
         import chromadb
         self._client = chromadb.PersistentClient(path=self._config.persist_dir)
 
+    def _init_sqlite(self):
+        """初始化 SQLite 连接并加载 sparse 缓存。"""
+        if self._sqlite_conn is not None:
+            return
+        db_path = Path(self._config.persist_dir) / "sparse_store.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._sqlite_conn = sqlite3.connect(str(db_path))
+        self._sqlite_conn.execute(
+            "CREATE TABLE IF NOT EXISTS sparse_vectors "
+            "(id TEXT PRIMARY KEY, sparse_json TEXT NOT NULL)"
+        )
+        self._sqlite_conn.commit()
+        cursor = self._sqlite_conn.execute("SELECT id, sparse_json FROM sparse_vectors")
+        for row in cursor:
+            raw = json.loads(row[1])
+            self._doc_sparse[row[0]] = {int(k): v for k, v in raw.items()}
+
     def _ensure_collection(self):
         if self._collection is not None:
             return
         self._ensure_client()
+        self._init_sqlite()
         name = self._config.collection_name
         self._collection = self._client.get_or_create_collection(
             name=name,
@@ -88,10 +111,16 @@ class VectorStore:
             metadatas=metadatas,
         )
 
-        # 本地缓存 sparse + 文本
+        # 持久化 sparse 向量到 SQLite + 内存缓存
+        rows = []
         for i, cid in enumerate(ids):
             self._doc_sparse[cid] = sparse_vecs[i]
-            self._doc_text[cid] = texts[i]
+            rows.append((cid, json.dumps(sparse_vecs[i])))
+        self._sqlite_conn.executemany(
+            "INSERT OR REPLACE INTO sparse_vectors (id, sparse_json) VALUES (?, ?)",
+            rows,
+        )
+        self._sqlite_conn.commit()
 
         return ids
 
@@ -101,7 +130,12 @@ class VectorStore:
             self._collection.delete(ids=ids)
         for cid in ids:
             self._doc_sparse.pop(cid, None)
-            self._doc_text.pop(cid, None)
+        if self._sqlite_conn:
+            self._sqlite_conn.executemany(
+                "DELETE FROM sparse_vectors WHERE id = ?",
+                [(cid,) for cid in ids],
+            )
+            self._sqlite_conn.commit()
 
     # ── 检索 ──────────────────────────────────────────────
 
@@ -169,7 +203,7 @@ class VectorStore:
                 "content": (
                     dense_results["documents"][0][i]
                     if dense_results["documents"]
-                    else self._doc_text.get(cid, "")
+                    else ""
                 ),
                 "score": round(float(hybrid[i]), 4),
                 "dense_score": round(float(d_scores[i]), 4),
@@ -194,6 +228,57 @@ class VectorStore:
         self._ensure_client()
         return [c.name for c in self._client.list_collections()]
 
+    def get_collection(self, name: str):
+        """
+        切换到指定 collection（不改变默认 collection 名）。
+
+        用于跨知识库操作。
+        """
+        self._ensure_client()
+        self._init_sqlite()
+        self._collection = self._client.get_or_create_collection(
+            name=name,
+            metadata={"hnsw:space": self._config.hnsw_space},
+            embedding_function=_NoOpEmbeddingFunction(),
+        )
+        return self._collection
+
+    def delete_by_filter(self, where: Dict[str, Any], collection_name: str = None) -> int:
+        """
+        按元数据条件删除向量（用于按 doc_name 删除文档的所有 chunk）。
+
+        参数:
+            where: ChromaDB where 条件，如 {"doc_name": "test"}
+            collection_name: 目标 collection（默认用当前配置的）
+
+        返回: 删除的 chunk 数量
+        """
+        if collection_name:
+            self.get_collection(collection_name)
+        else:
+            self._ensure_collection()
+
+        if self._collection is None or self._collection.count() == 0:
+            return 0
+
+        # ChromaDB 没有直接 delete by where，需要先查后删
+        results = self._collection.get(where=where)
+        ids_to_delete = results.get("ids", [])
+        if ids_to_delete:
+            self._collection.delete(ids=ids_to_delete)
+            # 清 sparse 缓存
+            for cid in ids_to_delete:
+                self._doc_sparse.pop(cid, None)
+            if self._sqlite_conn:
+                placeholders = ",".join("?" * len(ids_to_delete))
+                self._sqlite_conn.execute(
+                    f"DELETE FROM sparse_vectors WHERE id IN ({placeholders})",
+                    ids_to_delete,
+                )
+                self._sqlite_conn.commit()
+
+        return len(ids_to_delete)
+
     def drop_collection(self, name: str = None) -> None:
         """删除 collection。"""
         self._ensure_client()
@@ -202,6 +287,15 @@ class VectorStore:
             self._client.delete_collection(name)
         except Exception:
             pass
-        self._collection = None
-        self._doc_sparse.clear()
-        self._doc_text.clear()
+        # 只重置 collection 引用如果是当前 collection
+        if self._collection is not None and name == self._config.collection_name:
+            self._collection = None
+            self._doc_sparse.clear()
+            if self._sqlite_conn:
+                self._sqlite_conn.execute("DELETE FROM sparse_vectors")
+                self._sqlite_conn.commit()
+
+    def collection_exists(self, name: str) -> bool:
+        """检查 collection 是否存在。"""
+        self._ensure_client()
+        return name in [c.name for c in self._client.list_collections()]

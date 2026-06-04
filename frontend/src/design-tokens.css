@@ -1,0 +1,258 @@
+/* ═══════════════════════════════════════════════════════════
+   Design Tokens — RAG 知识库
+   Style: 水墨画风 (Chinese Ink-Wash Painting)
+   Palette: 宣纸米白 + 墨色渐变 + 朱砂红点缀
+   Typography: 楷体 / 宋体
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Google Fonts Import ─────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;500;600;700&family=Ma+Shan+Zheng&display=swap');
+
+/* ── CSS Custom Properties ────────────────────────────────── */
+:root {
+  /* === Color Palette — 水墨色谱 === */
+  --color-primary: #2c2416;
+  --color-primary-hover: #4a3d28;
+  --color-primary-light: #f0ebe0;
+  --color-primary-50: #f7f3eb;
+  --color-primary-100: #f0ebe0;
+  --color-primary-200: #e0d8c8;
+  --color-primary-300: #c4b99e;
+  --color-primary-400: #8a7e6b;
+  --color-primary-500: #5a4f3c;
+  --color-primary-600: #4a3d28;
+  --color-primary-700: #3a2e1a;
+  --color-primary-800: #2c2416;
+  --color-primary-900: #1a1814;
+
+  --color-secondary: #8a7e6b;
+  --color-secondary-light: #f0ebe0;
+
+  --color-accent: #c43a31;
+  --color-accent-light: #fce8e6;
+
+  /* ── 功能色 ── */
+  --color-success: #5a7d5a;
+  --color-success-light: #e1ece1;
+  --color-success-bg: #f0f5f0;
+
+  --color-warning: #b8a060;
+  --color-warning-light: #f5f0e0;
+  --color-warning-bg: #faf7ef;
+
+  --color-danger: #c43a31;
+  --color-danger-light: #fce5e3;
+  --color-danger-bg: #fef5f4;
+
+  --color-info: #6b7d8a;
+  --color-info-light: #e8edf0;
+
+  /* === Neutrals — 宣纸色系 === */
+  --color-bg: #f5f0e8;
+  --color-bg-alt: #f0e9db;
+  --color-surface: #faf6ef;
+  --color-surface-hover: #f3ede2;
+  --color-surface-secondary: #f0e9db;
+
+  --color-text: #1a1814;
+  --color-text-secondary: #4a4540;
+  --color-text-muted: #8a8378;
+  --color-text-inverse: #faf6ef;
+
+  --color-border: #d5cec0;
+  --color-border-light: #e8e0d0;
+  --color-border-focus: #5a4f3c;
+
+  /* === Shadows — 水墨阴影 === */
+  --shadow-xs: 0 1px 2px rgba(44, 36, 22, 0.04);
+  --shadow-sm: 0 1px 3px rgba(44, 36, 22, 0.05), 0 1px 2px rgba(44, 36, 22, 0.04);
+  --shadow-md: 0 4px 6px rgba(44, 36, 22, 0.05), 0 2px 4px rgba(44, 36, 22, 0.03);
+  --shadow-lg: 0 10px 15px rgba(44, 36, 22, 0.06), 0 4px 6px rgba(44, 36, 22, 0.03);
+  --shadow-xl: 0 20px 25px rgba(44, 36, 22, 0.07), 0 8px 10px rgba(44, 36, 22, 0.03);
+
+  /* === Typography — 书法字体 === */
+  --font-family: 'Noto Serif SC', 'STSong', 'Songti SC', 'SimSun', 'KaiTi', serif;
+  --font-display: 'STKaiti', 'Kaiti SC', 'KaiTi', 'STFangsong', 'FangSong', serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+
+  --text-xs: 0.8125rem;   /* 13px */
+  --text-sm: 0.875rem;    /* 14px */
+  --text-base: 1rem;      /* 16px */
+  --text-lg: 1.125rem;    /* 18px */
+  --text-xl: 1.25rem;     /* 20px */
+  --text-2xl: 1.5rem;     /* 24px */
+  --text-3xl: 1.75rem;    /* 28px */
+
+  --font-light: 300;
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.6;
+  --leading-relaxed: 1.75;
+
+  /* === Spacing Scale (4px base) === */
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+
+  /* === Border Radius === */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-full: 9999px;
+
+  /* === Transitions === */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* === Layout === */
+  --sidebar-width: 240px;
+  --header-height: 56px;
+  --content-max-width: 960px;
+
+  /* === Z-Index Scale === */
+  --z-base: 0;
+  --z-dropdown: 10;
+  --z-sticky: 20;
+  --z-sidebar: 30;
+  --z-modal: 50;
+  --z-toast: 60;
+}
+
+/* ── Global Reset ─────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: var(--text-base);
+  font-weight: var(--font-normal);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+  background: var(--color-bg);
+  height: 100vh;
+  overflow: hidden;
+  cursor: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  height: 100vh;
+}
+
+/* Allow text selection in inputs and textareas */
+input, textarea, [contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ── Scrollbar Styling — 水墨风 ──────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* ── Focus Styles (Accessibility) ────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
+
+/* ── Selection — 墨色选中 ────────────────────────────────── */
+
+::selection {
+  background: rgba(90, 79, 60, 0.2);
+  color: var(--color-text);
+}
+
+/* ── Background Layers — 宣纸纹理 ────────────────────────── */
+
+#bg-paper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 20% 80%, rgba(180, 160, 120, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 75% 20%, rgba(160, 140, 100, 0.08) 0%, transparent 40%),
+    radial-gradient(ellipse at 50% 50%, rgba(200, 180, 150, 0.06) 0%, transparent 60%),
+    linear-gradient(180deg, #f7f3eb 0%, #f2ece0 30%, #efe8d8 60%, #f3ede2 100%);
+}
+
+#bg-grain {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+}
+
+#bg-mountains {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+#bg-mountains svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ── Reduced Motion ───────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  body {
+    cursor: auto;
+  }
+}

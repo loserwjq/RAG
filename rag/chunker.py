@@ -17,6 +17,69 @@ from typing import Any, Dict, List, Tuple
 from rag.config import ChunkerConfig
 
 
+# ── HTML 表格转纯文本 ───────────────────────────────────────
+
+_HTML_BR_RE = re.compile(r'<br\s*/?>', re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_TR_RE = re.compile(r'<tr[^>]*>(.*?)</tr>', re.IGNORECASE | re.DOTALL)
+_TD_RE = re.compile(r'<(td|th)[^>]*>(.*?)</\1>', re.IGNORECASE | re.DOTALL)
+
+# 表头中匹配签名/签字列的关键词
+_SIGNATURE_KEYWORDS = ('签名', '签字', '签章', '签收')
+
+
+def _cell_text(cell_html: str) -> str:
+    """提取单元格纯文本。"""
+    text = _HTML_BR_RE.sub('\n', cell_html)
+    text = _HTML_TAG_RE.sub('', text)
+    return text.strip()
+
+
+def _find_signature_columns(rows: list[str], check_rows: int = 3) -> set:
+    """在表格前几行中查找含签名关键词的列索引。"""
+    sig_cols: set = set()
+    for row_html in rows[:check_rows]:
+        cells = _TD_RE.findall(row_html)
+        for col_idx, (_, inner) in enumerate(cells):
+            text = _cell_text(inner)
+            if any(kw in text for kw in _SIGNATURE_KEYWORDS):
+                sig_cols.add(col_idx)
+    return sig_cols
+
+
+def _html_table_to_text(html: str) -> str:
+    """将 HTML 表格转为可读纯文本，签名列替换为占位符。"""
+    if not html:
+        return ""
+
+    rows = _TR_RE.findall(html)
+    if not rows:
+        # 回退：原始 HTML，简单去标签
+        text = _HTML_BR_RE.sub('\n', html)
+        text = _HTML_TAG_RE.sub('', text)
+        return text.strip()
+
+    sig_cols = _find_signature_columns(rows)
+
+    lines: list[str] = []
+    for row_html in rows:
+        cells = _TD_RE.findall(row_html)
+        parts: list[str] = []
+        for col_idx, (_, inner) in enumerate(cells):
+            if col_idx in sig_cols:
+                text = _cell_text(inner)
+                if text:
+                    parts.append(f"[手写:{text}]")
+            else:
+                text = _cell_text(inner)
+                if text:
+                    parts.append(text)
+        if parts:
+            lines.append(' | '.join(parts))
+
+    return '\n'.join(lines)
+
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 def count_chars(text: str) -> int:
@@ -41,9 +104,17 @@ def _is_title(item: Dict) -> bool:
 def _get_text(item: Dict) -> str:
     t = item.get("type", "text")
     if t == "table":
+        parts = []
         caption = " ".join(_as_list(item.get("table_caption")))
-        body = item.get("table_body", "") or ""
-        return (caption + "\n" + body).strip() if caption else body.strip()
+        if caption:
+            parts.append(caption)
+        body = _html_table_to_text(item.get("table_body", ""))
+        if body:
+            parts.append(body)
+        footnote = " ".join(_as_list(item.get("table_footnote")))
+        if footnote:
+            parts.append(f"注: {footnote}")
+        return "\n".join(parts)
     if t == "equation":
         return item.get("text", "") or item.get("text_format", "") or ""
     return (item.get("text") or "").strip()

@@ -94,6 +94,262 @@ class PDFParser(BaseParser):
         return content_list
 
 
+# ── PPTX 解析器 ───────────────────────────────────────────
+
+@register_parser([".ppt"])
+class PPTParser(BaseParser):
+    """解析旧版 .ppt（二进制格式），通过 COM/ LibreOffice 转为 .pptx 后解析。"""
+
+    def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        import subprocess
+        import tempfile
+        import os
+        import platform
+
+        size_kb = file_path.stat().st_size / 1024
+        print(f"[Parser] PPT (legacy): {file_path.name} ({size_kb:.0f} KB)")
+
+        # 创建临时 .pptx 文件
+        tmp_dir = tempfile.mkdtemp(prefix="ppt_convert_")
+        pptx_path = Path(tmp_dir) / f"{file_path.stem}.pptx"
+
+        try:
+            if platform.system() == "Windows":
+                self._convert_via_com(file_path, pptx_path)
+            else:
+                self._convert_via_libreoffice(file_path, pptx_path)
+
+            # 委托 PPTXParser 解析
+            pptx_parser = PPTXParser(self.config)
+            return pptx_parser.parse(pptx_path)
+
+        finally:
+            # 清理临时文件
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _convert_via_com(self, source: Path, target: Path):
+        """Windows: 通过 PowerPoint COM 自动化转换。"""
+        import subprocess
+
+        ps1 = Path(__file__).parent / "convert_ppt.ps1"
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(ps1),
+                "-SourceFile", str(source.resolve()),
+                "-TargetFile", str(target.resolve()),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0 or not target.exists():
+            err = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"PPT 转换失败（需要安装 PowerPoint）。\n"
+                f"请手动将 .ppt 另存为 .pptx 格式后再上传。\n"
+                f"错误详情: {err[:500]}"
+            )
+        print(f"[Parser] PPT → PPTX 转换成功")
+
+    def _convert_via_libreoffice(self, source: Path, target: Path):
+        """非 Windows: 通过 LibreOffice CLI 转换。"""
+        import subprocess
+
+        src = str(source.resolve())
+        outdir = str(target.parent.resolve())
+        result = subprocess.run(
+            [
+                "libreoffice", "--headless", "--convert-to", "pptx",
+                "--outdir", outdir, src,
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        # LibreOffice names output as <stem>.pptx automatically
+        auto_name = target.parent / f"{source.stem}.pptx"
+        if result.returncode != 0 or not auto_name.exists():
+            err = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"PPT 转换失败（需要安装 LibreOffice）。\n"
+                f"请手动将 .ppt 另存为 .pptx 格式后再上传。\n"
+                f"错误详情: {err[:500]}"
+            )
+        # Rename to expected target path
+        if auto_name != target:
+            import shutil
+            shutil.move(str(auto_name), str(target))
+        print(f"[Parser] PPT → PPTX 转换成功 (LibreOffice)")
+
+
+@register_parser([".pptx"])
+class PPTXParser(BaseParser):
+    """使用 python-pptx 解析 PowerPoint 文件。"""
+
+    def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        from pptx import Presentation
+
+        size_kb = file_path.stat().st_size / 1024
+        print(f"[Parser] PPTX: {file_path.name} ({size_kb:.0f} KB)")
+
+        prs = Presentation(str(file_path))
+        items: List[Dict[str, Any]] = []
+
+        for slide_idx, slide in enumerate(prs.slides):
+            slide_texts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            slide_texts.append(text)
+                if shape.has_table:
+                    table = shape.table
+                    rows_data = []
+                    for row in table.rows:
+                        row_data = [cell.text.strip() for cell in row.cells]
+                        rows_data.append(" | ".join(row_data))
+                    table_text = "\n".join(rows_data)
+                    if table_text.strip():
+                        items.append({
+                            "type": "table",
+                            "text": table_text,
+                            "page_idx": slide_idx,
+                            "bbox": [0, 0, 0, 0],
+                        })
+
+            if slide_texts:
+                # 第一行作为标题
+                items.append({
+                    "type": "text",
+                    "text": slide_texts[0],
+                    "text_level": 2,
+                    "page_idx": slide_idx,
+                    "bbox": [0, 0, 0, 0],
+                })
+                if len(slide_texts) > 1:
+                    items.append({
+                        "type": "text",
+                        "text": "\n".join(slide_texts[1:]),
+                        "page_idx": slide_idx,
+                        "bbox": [0, 0, 0, 0],
+                    })
+
+        print(f"[Parser] 输出 {len(items)} 个 block")
+        return items
+
+
+# ── DOCX 解析器 ───────────────────────────────────────────
+
+@register_parser([".docx"])
+class DOCXParser(BaseParser):
+    """使用 python-docx 解析 Word 文件。"""
+
+    def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        from docx import Document
+
+        size_kb = file_path.stat().st_size / 1024
+        print(f"[Parser] DOCX: {file_path.name} ({size_kb:.0f} KB)")
+
+        doc = Document(str(file_path))
+        items: List[Dict[str, Any]] = []
+
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+
+            # 根据段落样式判断标题级别
+            style_name = (para.style.name or "").lower()
+            if "heading" in style_name:
+                # 提取标题级别 (Heading 1 → 1, Heading 2 → 2, ...)
+                level = 1
+                for ch in style_name:
+                    if ch.isdigit():
+                        level = int(ch)
+                        break
+                items.append({
+                    "type": "text",
+                    "text": text,
+                    "text_level": level,
+                    "page_idx": 0,
+                    "bbox": [0, 0, 0, 0],
+                })
+            else:
+                items.append({
+                    "type": "text",
+                    "text": text,
+                    "page_idx": 0,
+                    "bbox": [0, 0, 0, 0],
+                })
+
+        # 解析表格
+        for table in doc.tables:
+            rows_data = []
+            for row in table.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                rows_data.append(" | ".join(row_data))
+            table_text = "\n".join(rows_data)
+            if table_text.strip():
+                items.append({
+                    "type": "table",
+                    "text": table_text,
+                    "page_idx": 0,
+                    "bbox": [0, 0, 0, 0],
+                })
+
+        print(f"[Parser] 输出 {len(items)} 个 block")
+        return items
+
+
+# ── Excel 解析器 ──────────────────────────────────────────
+
+@register_parser([".xlsx", ".xls"])
+class ExcelParser(BaseParser):
+    """使用 openpyxl 解析 Excel 文件。"""
+
+    def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        from openpyxl import load_workbook
+
+        size_kb = file_path.stat().st_size / 1024
+        print(f"[Parser] Excel: {file_path.name} ({size_kb:.0f} KB)")
+
+        wb = load_workbook(str(file_path), read_only=True, data_only=True)
+        items: List[Dict[str, Any]] = []
+
+        for sheet_idx, sheet_name in enumerate(wb.sheetnames):
+            ws = wb[sheet_name]
+
+            # Sheet 名作为标题
+            items.append({
+                "type": "text",
+                "text": f"工作表: {sheet_name}",
+                "text_level": 2,
+                "page_idx": sheet_idx,
+                "bbox": [0, 0, 0, 0],
+            })
+
+            # 将表格内容转为文本
+            rows_data = []
+            for row in ws.iter_rows(values_only=True):
+                row_text = [str(cell) if cell is not None else "" for cell in row]
+                if any(cell.strip() for cell in row_text):
+                    rows_data.append(" | ".join(row_text))
+
+            if rows_data:
+                items.append({
+                    "type": "table",
+                    "text": "\n".join(rows_data),
+                    "page_idx": sheet_idx,
+                    "bbox": [0, 0, 0, 0],
+                })
+
+        wb.close()
+        print(f"[Parser] 输出 {len(items)} 个 block")
+        return items
+
+
 # ── Markdown 解析器 ───────────────────────────────────────
 
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
