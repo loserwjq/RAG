@@ -2,11 +2,21 @@
 统一配置管理 — 所有可调参数集中于此。
 
 支持环境变量覆盖，方便部署时调整而无需改代码。
+环境变量优先级: 系统环境变量 > .env 文件 > 默认值
 """
 
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
+
+# 加载 .env 文件（如存在）
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
 
 
 @dataclass
@@ -81,7 +91,7 @@ class RerankerConfig:
 class LLMConfig:
     """LLM 配置（Gitee AI / OpenAI 兼容 API）。"""
     base_url: str = "https://ai.gitee.com/v1"       # API 地址
-    api_key: str = "4GAJXWCGWLBBXRJAFLYPBDGB6TRXTP9ZUQHIPOOY"  # API Key
+    api_key: str = ""  # API Key（通过环境变量 RAG_LLM_API_KEY 或 .env 文件设置）
     model: str = "Qwen3-235B-A22B"                   # 模型名称
     temperature: float = 0.3                          # 生成温度（低温更精确）
     max_tokens: int = 2048                            # 最大生成 token 数
@@ -122,7 +132,7 @@ class DatabaseConfig:
 @dataclass
 class AuthConfig:
     """认证配置。"""
-    jwt_secret: str = "change-me-in-production"
+    jwt_secret: str = ""  # JWT 密钥（通过环境变量 RAG_JWT_SECRET 或 .env 文件设置）
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
     # 简易模式（开发环境）：使用 X-User-Id header 跳过 JWT
@@ -176,6 +186,8 @@ class RAGConfig:
             cfg.search.alpha = float(v)
 
         # LLM
+        if v := os.getenv("RAG_LLM_API_KEY"):
+            cfg.llm.api_key = v
         if v := os.getenv("RAG_LLM_URL"):
             cfg.llm.base_url = v
         if v := os.getenv("RAG_LLM_MODEL"):
