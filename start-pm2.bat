@@ -34,8 +34,8 @@ echo   部署完成！
 echo ========================================
 echo.
 echo   前端: http://localhost:5173
-echo   后端: http://localhost:8000
-echo   API:  http://localhost:8000/docs
+echo   后端: http://localhost:8005
+echo   API:  http://localhost:8005/docs
 echo.
 echo   常用命令:
 echo     pm2 list          查看进程状态

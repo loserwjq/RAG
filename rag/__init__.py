@@ -25,10 +25,16 @@ RAG Pipeline — 分层解耦架构，支持多用户知识库。
 def __getattr__(name):
     """惰性导入，避免 import rag 时立即加载重型依赖。"""
     _lazy = {
+        # 核心模块
         "Pipeline": "rag.pipeline",
         "Database": "rag.database",
         "KBManager": "rag.kb_manager",
         "AuthManager": "rag.auth",
+        # LangChain 适配器
+        "BGEHybridEmbeddings": "rag.lc_embeddings",
+        "RAGDocumentLoader": "rag.lc_loader",
+        "HybridChunkTextSplitter": "rag.lc_splitter",
+        "HybridRetriever": "rag.lc_retriever",
     }
     if name in _lazy:
         import importlib
@@ -38,4 +44,8 @@ def __getattr__(name):
     raise AttributeError(f"module 'rag' has no attribute {name!r}")
 
 
-__all__ = ["Pipeline", "Database", "KBManager", "AuthManager"]
+__all__ = [
+    "Pipeline", "Database", "KBManager", "AuthManager",
+    "BGEHybridEmbeddings", "RAGDocumentLoader",
+    "HybridChunkTextSplitter", "HybridRetriever",
+]

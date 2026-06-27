@@ -28,3 +28,14 @@ Thumbs.db
 # 临时文件
 *.tmp
 *.log
+
+# 运行时数据
+data/
+uploads/
+logs/
+
+# 杂项文件
+_misc/
+_archive/
+.agents/
+.qoder/

@@ -1,7 +1,7 @@
 """
 API 网关 — 多用户知识库系统。
 
-端口: 8000
+端口: 8005
 功能:
     - 用户认证（Dev Mode / JWT）
     - 知识库 CRUD（用户隔离 + 部门可见）
@@ -25,9 +25,10 @@ from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from fastapi import FastAPI, Request, UploadFile, File, Form, Query, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, Form, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 
@@ -39,6 +40,7 @@ from rag.auth import AuthManager, hash_password, verify_password, get_auth_manag
 from rag.kb_manager import KBManager
 
 app = FastAPI(title="RAG Gateway - Multi-User Knowledge Base")
+dify_security = HTTPBearer(scheme_name="Dify API Key", description="输入 Dify API Key，默认: dify-rag-secret-key")
 logger = setup_service(app, "gateway")
 
 app.add_middleware(
@@ -1215,6 +1217,201 @@ async def stats(request: Request):
     return stats
 
 
+# ═══════════════════════════════════════════════════════════
+#  Dify 对接接口（无需认证，通过 API Key 鉴权）
+# ═══════════════════════════════════════════════════════════
+
+DIFY_API_KEY = os.environ.get("DIFY_API_KEY", "dify-rag-secret-key")
+
+
+def _verify_dify_key(credentials: HTTPAuthorizationCredentials = Depends(dify_security)):
+    """验证 Dify 请求的 API Key。"""
+    if credentials.credentials != DIFY_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+
+
+class DifyIngestRequest(BaseModel):
+    """Dify 写入请求 — 把文本存入向量库。"""
+    text: str
+    metadata: Optional[Dict] = None
+    collection: Optional[str] = None  # 不指定则用默认 collection
+
+
+class DifySearchRequest(BaseModel):
+    """Dify 检索请求 — 从向量库召回。"""
+    query: str
+    top_k: Optional[int] = 5
+    collection: Optional[str] = None
+
+
+class DifyRetrievalRequest(BaseModel):
+    """Dify 外部知识库标准格式。"""
+    knowledge_id: str
+    query: str
+    retrieval_setting: Optional[Dict] = None
+
+
+@app.post("/api/dify/ingest")
+async def dify_ingest(req: DifyIngestRequest, request: Request, _: None = Depends(_verify_dify_key)):
+    """Dify 调用：把文本切块后存入向量库。
+
+    用法：Dify 工作流中用 HTTP 请求节点，把 LLM 输出写入这里。
+    """
+
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+
+    # 简单按段落切块（适合 Dify 输出的结构化文本）
+    chunks = _split_text_for_dify(text)
+
+    metadata_base = req.metadata or {}
+    metadata_base.setdefault("source", "dify")
+    metadata_base.setdefault("ingested_at", datetime.now().isoformat())
+
+    metadatas = []
+    for i, chunk in enumerate(chunks):
+        m = {**metadata_base, "chunk_index": i}
+        metadatas.append(m)
+
+    collection = req.collection or _default_dify_collection()
+
+    # 调用 vector service 写入
+    resp = await client.call("vector", "/add", json={
+        "texts": chunks,
+        "metadatas": metadatas,
+        "collection": collection,
+    })
+
+    if "error" in resp:
+        raise HTTPException(status_code=500, detail=resp["error"])
+
+    return {
+        "success": True,
+        "chunks_stored": len(chunks),
+        "collection": collection,
+        "ids": resp.get("ids", []),
+    }
+
+
+@app.post("/api/dify/search")
+async def dify_search(req: DifySearchRequest, request: Request, _: None = Depends(_verify_dify_key)):
+    """Dify 调用：从向量库检索相关内容。
+
+    用法：Dify Agent/Workflow 中作为自定义工具调用。
+    """
+
+    collection = req.collection or _default_dify_collection()
+
+    resp = await client.call("vector", "/search", json={
+        "query": req.query,
+        "top_k": req.top_k,
+        "collection": collection,
+    })
+
+    if "error" in resp:
+        raise HTTPException(status_code=500, detail=resp["error"])
+
+    results = resp.get("results", [])
+
+    # 可选重排
+    if results:
+        try:
+            rerank_resp = await client.call("reranker", "/rerank", json={
+                "query": req.query,
+                "documents": results,
+                "top_k": req.top_k,
+            })
+            if "error" not in rerank_resp:
+                results = rerank_resp.get("results", results)
+        except Exception:
+            pass
+
+    return {
+        "results": [
+            {
+                "text": r.get("content", "") or r.get("text", ""),
+                "score": r.get("score", 0),
+                "metadata": r.get("metadata", {}),
+            }
+            for r in results[:req.top_k]
+        ]
+    }
+
+
+@app.post("/api/dify/retrieval")
+async def dify_retrieval(req: DifyRetrievalRequest, request: Request, _: None = Depends(_verify_dify_key)):
+    """Dify 外部知识库标准接口。
+
+    符合 Dify External Knowledge Base API 规范。
+    Dify 会按此格式调用来做知识检索。
+    """
+
+    top_k = 5
+    if req.retrieval_setting:
+        top_k = req.retrieval_setting.get("top_k", 5)
+
+    collection = req.knowledge_id or _default_dify_collection()
+
+    resp = await client.call("vector", "/search", json={
+        "query": req.query,
+        "top_k": top_k,
+        "collection": collection,
+    })
+
+    if "error" in resp:
+        raise HTTPException(status_code=500, detail=resp["error"])
+
+    results = resp.get("results", [])
+
+    # Dify 外部知识库要求的返回格式
+    records = []
+    for r in results[:top_k]:
+        records.append({
+            "content": r.get("content", "") or r.get("text", ""),
+            "score": r.get("score", 0),
+            "title": r.get("metadata", {}).get("doc_name", ""),
+            "metadata": r.get("metadata", {}),
+        })
+
+    return {"records": records}
+
+
+def _default_dify_collection() -> str:
+    """Dify 专用的默认 collection 名称。"""
+    return os.environ.get("DIFY_COLLECTION", "dify_knowledge")
+
+
+def _split_text_for_dify(text: str, max_chunk: int = 800) -> List[str]:
+    """简单切块：按双换行分段，超长段按句子拆分。"""
+    paragraphs = re.split(r'\n{2,}', text)
+    chunks = []
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= max_chunk:
+            chunks.append(para)
+        else:
+            # 按句子拆分
+            sentences = re.split(r'(?<=[。！？.!?\n])', para)
+            current = ""
+            for sent in sentences:
+                if len(current) + len(sent) > max_chunk and current:
+                    chunks.append(current.strip())
+                    current = sent
+                else:
+                    current += sent
+            if current.strip():
+                chunks.append(current.strip())
+
+    if not chunks:
+        chunks = [text[:max_chunk]]
+
+    return chunks
+
+
 @app.on_event("shutdown")
 async def shutdown():
     await client.close()
@@ -1223,4 +1420,4 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8005)

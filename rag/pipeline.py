@@ -1,8 +1,17 @@
 """
-编排层 — 串联 Parser → Chunker → Embedder → Store → Search → QA。
+编排层 — LangChain RAG Pipeline。
 
+使用 LangChain 组件串联 Parser → Chunker → Embedder → Store → Search → QA。
 Pipeline 是唯一的「胶水层」，各组件通过配置注入，互不依赖。
 上层只需调用 Pipeline 的方法，无需了解内部组件细节。
+
+LangChain 集成:
+    - 文档加载: RAGDocumentLoader (BaseLoader)
+    - 文本切块: HybridChunkTextSplitter (TextSplitter)
+    - 向量化:   BGEHybridEmbeddings (Embeddings)
+    - 检索:     HybridRetriever (BaseRetriever) + VectorStore.search()
+    - 重排:     Reranker + rerank_documents()
+    - 生成:     LLM (langchain_openai.ChatOpenAI)
 """
 
 import json
@@ -12,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from rag.config import RAGConfig
+from rag.config import RAGConfig, SearchConfig
 from rag.parser import get_parser
 from rag.chunker import Chunker, count_chars
 from rag.embedder import Embedder
@@ -20,9 +29,15 @@ from rag.store import VectorStore
 from rag.reranker import Reranker
 from rag.llm import LLM, LLMError
 
+# LangChain 适配器
+from rag.lc_loader import RAGDocumentLoader
+from rag.lc_splitter import HybridChunkTextSplitter
+from rag.lc_retriever import HybridRetriever
+from rag.lc_reranker import rerank_documents
+
 
 class Pipeline:
-    """RAG 全流程编排。
+    """RAG 全流程编排（LangChain 驱动）。
 
     用法:
         from rag import Pipeline
@@ -30,7 +45,7 @@ class Pipeline:
         pipe = Pipeline()
         pipe.ingest("test.md")                    # 解析 + 切块 + 向量化 + 存储
         results = pipe.search("加班费怎么算")      # 混合检索
-        answer = pipe.ask("加班费怎么算")          # 检索 + 问答（待接入 LLM）
+        answer = pipe.ask("加班费怎么算")          # 检索 + 问答
     """
 
     def __init__(self, config: RAGConfig = None):
@@ -41,6 +56,14 @@ class Pipeline:
         self._reranker = Reranker(self._config.reranker) if self._config.reranker.enabled else None
         self._llm = LLM(self._config.llm)
 
+        # ── LangChain 适配器 ──
+        self._text_splitter = HybridChunkTextSplitter(config=self._config.chunker)
+        self._retriever = HybridRetriever(
+            store=self._store,
+            embedder=self._embedder,
+            search_config=self._config.search,
+        )
+
     # ── 文档入库 ──────────────────────────────────────────
 
     def ingest(
@@ -50,10 +73,10 @@ class Pipeline:
         save_chunks: bool = True,
     ) -> Dict[str, Any]:
         """
-        完整入库流程: 解析 → 切块 → 向量化 → 存储。
+        完整入库流程: 解析 → 切块 → 向量化 → 存储（LangChain 驱动）。
 
         参数:
-            file_path: 文件路径 (PDF/MD/TXT)
+            file_path: 文件路径 (PDF/MD/TXT/PPTX/DOCX/XLSX)
             doc_name: 文档名称（用于 metadata），默认取文件名
             save_chunks: 是否保存切块 JSON 文件
 
@@ -66,25 +89,30 @@ class Pipeline:
         doc_name = doc_name or path.stem
         t_start = time.time()
 
-        # Step 1: 解析
-        parser = get_parser(path, self._config.parser)
-        content_list = parser.parse(path)
+        # Step 1: LangChain Loader 加载文档
+        loader = RAGDocumentLoader(path, self._config.parser, doc_name=doc_name)
+        docs = list(loader.lazy_load())
+        print(f"[Pipeline] 解析: {len(docs)} blocks")
 
-        # Step 2: 切块
-        chunks = self._chunker.chunk(content_list)
-        text_chunks = [c for c in chunks if c.get("type") == "text"]
-        print(f"[Pipeline] 切块: {len(content_list)} blocks → {len(text_chunks)} text chunks")
+        if not docs:
+            print("[Pipeline] 警告: 文档无内容")
+            return {"doc_name": doc_name, "n_chunks": 0, "n_stored": 0, "elapsed": 0}
+
+        # Step 2: LangChain TextSplitter 切块
+        chunk_docs = self._text_splitter.split_documents(docs)
+        text_chunks = [d for d in chunk_docs if d.metadata.get("type") == "text"]
+        print(f"[Pipeline] 切块: {len(docs)} blocks → {len(text_chunks)} text chunks")
 
         if not text_chunks:
             print("[Pipeline] 警告: 无文本 chunk 可入库")
-            return {"doc_name": doc_name, "n_chunks": 0, "n_stored": 0, "elapsed": 0}
+            return {"doc_name": doc_name, "n_chunks": len(chunk_docs), "n_stored": 0, "elapsed": 0}
 
-        # 保存切块结果
+        # 保存切块结果（保持向后兼容）
         if save_chunks:
-            self._save_chunks(chunks, path, doc_name)
+            self._save_chunks_from_docs(chunk_docs, path, doc_name)
 
         # Step 3: 向量化
-        texts = [c["text"] for c in text_chunks]
+        texts = [d.page_content for d in text_chunks]
         print(f"[Pipeline] 向量化 {len(texts)} chunks...")
 
         t0 = time.time()
@@ -96,10 +124,9 @@ class Pipeline:
         # Step 4: 存储
         metadatas = [{
             "doc_name": doc_name,
-            "type": c.get("type", "text"),
-            "page_idx": c.get("page_idx", 0),
+            **d.metadata,
             "chunk_idx": i,
-        } for i, c in enumerate(text_chunks)]
+        } for i, d in enumerate(text_chunks)]
 
         ids = self._store.add(texts, dense_vecs, sparse_vecs, metadatas)
         elapsed = time.time() - t_start
@@ -107,7 +134,7 @@ class Pipeline:
 
         return {
             "doc_name": doc_name,
-            "n_chunks": len(chunks),
+            "n_chunks": len(chunk_docs),
             "n_stored": len(ids),
             "elapsed": round(elapsed, 1),
         }
@@ -134,8 +161,6 @@ class Pipeline:
 
         返回: [{id, content, score, metadata, dense_score, sparse_score, rerank_score?}]
         """
-        from rag.config import SearchConfig
-
         t_total = time.time()
         final_top_k = top_k or self._config.search.top_k
 
@@ -147,14 +172,14 @@ class Pipeline:
             rewritten = self._llm.rewrite_query(query)
             if rewritten and rewritten != query:
                 search_query = rewritten
-                print(f"[Pipeline.search] [timer]Query rewritten: \"{query}\" -> \"{rewritten}\" ({time.time() - t0:.2f}s)")
+                print(f"[Pipeline.search] Query rewritten: \"{query}\" -> \"{rewritten}\" ({time.time() - t0:.2f}s)")
 
         # 编码 query
         t0 = time.time()
         q = self._embedder.encode([search_query])
         qd, qs = q["dense"][0], q["sparse"][0]
         t_encode = time.time() - t0
-        print(f"[Pipeline.search] [timer]Query 编码: {t_encode:.2f}s")
+        print(f"[Pipeline.search] Query 编码: {t_encode:.2f}s")
 
         # 初检：召回更多候选（reranker 需要更大候选集）
         recall_k = final_top_k * 3 if (rerank and self._reranker) else final_top_k
@@ -167,18 +192,18 @@ class Pipeline:
         t0 = time.time()
         results = self._store.search(qd, qs, search_cfg)
         t_search = time.time() - t0
-        print(f"[Pipeline.search] [timer]向量库检索: {t_search:.2f}s")
+        print(f"[Pipeline.search] 向量库检索: {t_search:.2f}s")
 
         # Reranker 精排
         if rerank and self._reranker and results:
             t0 = time.time()
             results = self._reranker.rerank_results(query, results, top_k=final_top_k)
             t_rerank = time.time() - t0
-            print(f"[Pipeline.search] [timer]Reranker 精排: {t_rerank:.2f}s")
+            print(f"[Pipeline.search] Reranker 精排: {t_rerank:.2f}s")
         else:
             results = results[:final_top_k]
 
-        print(f"[Pipeline.search] [timer]检索总耗时: {time.time() - t_total:.2f}s")
+        print(f"[Pipeline.search] 检索总耗时: {time.time() - t_total:.2f}s")
         return results
 
     # ── 问答 ──────────────────────────────────────────────
@@ -235,6 +260,82 @@ class Pipeline:
             } for r in results],
         }
 
+    # ── LangChain LCEL 链 ─────────────────────────────────
+
+    def as_retriever(self, top_k: int = None, alpha: float = None) -> HybridRetriever:
+        """返回一个可独立使用的 LangChain Retriever。
+
+        参数:
+            top_k: 返回结果数
+            alpha: dense/sparse 融合权重
+
+        返回: HybridRetriever 实例
+        """
+        if top_k is not None or alpha is not None:
+            cfg = SearchConfig(
+                top_k=top_k or self._config.search.top_k,
+                alpha=alpha if alpha is not None else self._config.search.alpha,
+                candidate_multiplier=self._config.search.candidate_multiplier,
+            )
+            return HybridRetriever(store=self._store, embedder=self._embedder, search_config=cfg)
+        return self._retriever
+
+    def as_reranker_step(self):
+        """返回一个 LCEL Runnable，用于对检索结果重排。
+
+        用法:
+            step = pipe.as_reranker_step()
+            chain = retriever | step
+        """
+        from rag.lc_reranker import create_reranker_runnable
+        return create_reranker_runnable(self._reranker)
+
+    def _build_qa_chain(self):
+        """构建 LCEL QA 链（用于演示 LangChain 集成能力）。
+
+        链结构:
+            retriever → format_docs → prompt → llm → StrOutputParser
+
+        返回: LCEL Runnable
+        """
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+
+        template = """请基于以下参考文档回答用户的问题。
+
+要求：
+1. 只使用参考文档中的信息来回答
+2. 如果文档中没有相关信息，明确说明"根据现有资料无法回答该问题"
+3. 回答要简洁准确，必要时分点列出
+4. 如果涉及具体数字、日期、流程，请准确引用
+5. 回答正文中不要提及"参考文档1""文档9"等编号，直接陈述事实即可
+
+参考文档：
+{context}
+
+用户问题：{question}"""
+
+        prompt = ChatPromptTemplate.from_template(template)
+
+        def _format_docs(docs):
+            return "\n\n---\n\n".join(
+                f"[参考文档: {d.metadata.get('doc_name', '文档')}] "
+                f"(相关度: {d.metadata.get('score', 0):.3f})\n{d.page_content}"
+                for d in docs
+            )
+
+        chain = (
+            {
+                "context": self._retriever | RunnableLambda(_format_docs),
+                "question": RunnablePassthrough(),
+            }
+            | prompt
+            | self._llm._chat_model
+            | StrOutputParser()
+        )
+        return chain
+
     def _build_context(self, results: List[Dict]) -> str:
         """将检索结果拼接为 LLM 上下文。"""
         parts = []
@@ -251,13 +352,26 @@ class Pipeline:
 
     # ── 工具方法 ──────────────────────────────────────────
 
-    def _save_chunks(self, chunks: List[Dict], file_path: Path, doc_name: str) -> Path:
-        """保存切块结果到 JSON。"""
+    def _save_chunks_from_docs(self, chunk_docs: List, file_path: Path, doc_name: str) -> Path:
+        """保存切块结果到 JSON（从 LangChain Document 格式）。"""
         output_dir = Path(self._config.parser.output_dir) / doc_name / "auto"
         output_dir.mkdir(parents=True, exist_ok=True)
         chunk_path = output_dir / f"{doc_name}_chunks.json"
+
+        # 转换为可序列化格式
+        serializable = []
+        for d in chunk_docs:
+            item = {
+                "type": d.metadata.get("type", "text"),
+                "text": d.page_content,
+                "page_idx": d.metadata.get("page_idx", 0),
+                "bbox": d.metadata.get("bbox", [0, 0, 0, 0]),
+                "metadata": d.metadata,
+            }
+            serializable.append(item)
+
         chunk_path.write_text(
-            json.dumps(chunks, ensure_ascii=False, indent=2),
+            json.dumps(serializable, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         print(f"[Pipeline] 切块已保存: {chunk_path}")
