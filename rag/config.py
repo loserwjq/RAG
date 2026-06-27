@@ -24,10 +24,16 @@ class ParserConfig:
     """文件解析配置。"""
     output_dir: str = "./output"
     lang: str = "ch"
-    backend: str = "pipeline"
-    parse_method: str = "auto"
+    backend: str = "pipeline"        # pipeline / vlm-http-client / hybrid-http-client
+    parse_method: str = "auto"       # auto / txt / ocr
     formula_enable: bool = True
     table_enable: bool = True
+
+    # MinerU 运行模式
+    mineru_mode: str = "local"       # "local" = 直接调用 do_parse()（需本地模型）
+                                      # "api"   = 调用 MinerU 云端 API（mineru.net，需 token）
+    mineru_api_token: str = ""       # API 模式下的 token（从 https://mineru.net/apiManage/token 获取）
+    mineru_model_version: str = "vlm"  # API 模式下的模型版本: pipeline / vlm / MinerU-HTML
 
 
 @dataclass
@@ -162,6 +168,14 @@ class RAGConfig:
             cfg.parser.output_dir = v
         if v := os.getenv("RAG_LANG"):
             cfg.parser.lang = v
+        if v := os.getenv("RAG_MINERU_MODE"):
+            cfg.parser.mineru_mode = v
+        if v := os.getenv("RAG_MINERU_API_TOKEN"):
+            cfg.parser.mineru_api_token = v
+        if v := os.getenv("RAG_MINERU_MODEL_VERSION"):
+            cfg.parser.mineru_model_version = v
+        if v := os.getenv("RAG_MINERU_BACKEND"):
+            cfg.parser.backend = v
 
         # Chunker
         if v := os.getenv("RAG_MAX_CHUNK_CHARS"):

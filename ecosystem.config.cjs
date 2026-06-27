@@ -28,6 +28,9 @@ module.exports = {
       cwd: "D:/minerU_local",
       env: {
         MINERU_DEVICE_MODE: "cuda",
+        RAG_MINERU_MODE: "local",
+        # RAG_MINERU_MODE: "api",              # 切换为 MinerU 云端 API
+        # RAG_MINERU_API_TOKEN: "your-token", # API token（mineru.net 获取）
         PYTHONUTF8: "1",
         PYTHONIOENCODING: "utf-8",
       },

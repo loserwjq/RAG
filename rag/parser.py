@@ -54,9 +54,22 @@ class BaseParser:
 
 @register_parser([".pdf"])
 class PDFParser(BaseParser):
-    """使用 MinerU 解析 PDF。"""
+    """使用 MinerU 解析 PDF。
+
+    支持两种模式（通过 config.mineru_mode 控制）：
+      - "local": 直接调用 do_parse()，需本地模型和 torch
+      - "api":   通过 HTTP API 调用 MinerU 服务（服务独立部署）
+    """
 
     def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        if self.config.mineru_mode == "api":
+            return self._parse_via_api(file_path)
+        else:
+            return self._parse_local(file_path)
+
+    # ── 本地模式 ──────────────────────────────────────────
+
+    def _parse_local(self, file_path: Path) -> List[Dict[str, Any]]:
         import os
         os.environ.setdefault("MINERU_MODEL_SOURCE", "local")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -65,7 +78,7 @@ class PDFParser(BaseParser):
 
         stem = file_path.stem
         size_kb = file_path.stat().st_size / 1024
-        print(f"[Parser] PDF: {file_path.name} ({size_kb:.0f} KB)")
+        print(f"[Parser] PDF (local): {file_path.name} ({size_kb:.0f} KB)")
 
         pdf_bytes = read_fn(file_path)
 
@@ -92,6 +105,212 @@ class PDFParser(BaseParser):
         content_list = json.loads(content_path.read_text(encoding="utf-8"))
         print(f"[Parser] 输出 {len(content_list)} 个 block")
         return content_list
+
+    # ── API 模式（MinerU 云端 API）──────────────────────
+
+    _MINERU_API_BASE = "https://mineru.net/api/v4"
+
+    def _parse_via_api(self, file_path: Path) -> List[Dict[str, Any]]:
+        import re
+        import tempfile
+        import zipfile
+        from pathlib import PurePosixPath
+
+        import httpx
+
+        token = self.config.mineru_api_token
+        if not token:
+            raise ValueError(
+                "MinerU API 模式需要 token，请在 .env 中设置 RAG_MINERU_API_TOKEN\n"
+                "获取地址: https://mineru.net/apiManage/token"
+            )
+
+        stem = file_path.stem
+        size_kb = file_path.stat().st_size / 1024
+        print(f"[Parser] PDF (MinerU Cloud API): {file_path.name} ({size_kb:.0f} KB)")
+        print(f"[Parser] 模型版本: {self.config.mineru_model_version}")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        base = self._MINERU_API_BASE
+        t0 = time.time()
+
+        # ── Step 1: 申请预签名上传 URL ──
+        print(f"[Parser] Step 1/4: 申请上传链接...")
+        body = {
+            "files": [{"name": file_path.name}],
+            "model_version": self.config.mineru_model_version,
+            "enable_formula": self.config.formula_enable,
+            "enable_table": self.config.table_enable,
+            "language": self.config.lang,
+        }
+        resp = httpx.post(f"{base}/file-urls/batch", headers=headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            self._raise_api_error("申请上传链接失败", resp)
+        result = resp.json()
+        if result.get("code") != 0:
+            raise RuntimeError(f"申请上传链接失败: {result.get('msg', result)}")
+
+        batch_id = result["data"]["batch_id"]
+        file_urls = result["data"]["file_urls"]
+        print(f"[Parser] batch_id={batch_id}, 获得 {len(file_urls)} 个上传链接")
+
+        # ── Step 2: PUT 上传文件 ──
+        print(f"[Parser] Step 2/4: 上传文件...")
+        file_bytes = file_path.read_bytes()
+        for i, upload_url in enumerate(file_urls):
+            put_resp = httpx.put(upload_url, content=file_bytes, timeout=120)
+            if put_resp.status_code != 200:
+                raise RuntimeError(f"文件上传失败 ({put_resp.status_code}): {put_resp.text[:200]}")
+        print(f"[Parser] 上传完成 ({len(file_bytes)/1024:.0f} KB)")
+
+        # ── Step 3: 轮询解析结果 ──
+        print(f"[Parser] Step 3/4: 等待解析完成...")
+        poll_url = f"{base}/extract-results/batch/{batch_id}"
+        max_wait = 600
+        interval = 3.0
+        waited = 0.0
+
+        while waited < max_wait:
+            import time as _time
+            _time.sleep(interval)
+            waited += interval
+
+            resp = httpx.get(poll_url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                self._raise_api_error("查询任务状态失败", resp)
+            result = resp.json()
+            if result.get("code") != 0:
+                raise RuntimeError(f"查询失败: {result.get('msg')}")
+
+            extract_results = result["data"].get("extract_result", [])
+            if not extract_results:
+                continue
+
+            state = extract_results[0].get("state")
+            if state == "done":
+                full_zip_url = extract_results[0].get("full_zip_url")
+                if not full_zip_url:
+                    raise RuntimeError("解析完成但未返回 full_zip_url")
+                break
+            elif state == "failed":
+                err = extract_results[0].get("err_msg", "未知错误")
+                raise RuntimeError(f"解析失败: {err}")
+            else:
+                progress = extract_results[0].get("extract_progress", {})
+                if progress:
+                    print(f"[Parser] 进度: {progress.get('extracted_pages','?')}/"
+                          f"{progress.get('total_pages','?')} 页, 状态: {state}")
+
+        if waited >= max_wait:
+            raise RuntimeError(f"解析超时 ({max_wait}s)")
+
+        elapsed = time.time() - t0
+        print(f"[Parser] 解析完成 ({elapsed:.1f}s)")
+
+        # ── Step 4: 下载并解压结果 ──
+        print(f"[Parser] Step 4/4: 下载结果...")
+        resp = httpx.get(full_zip_url, timeout=60)
+        if resp.status_code != 200:
+            raise RuntimeError(f"下载结果失败: {resp.status_code}")
+
+        _M = PurePosixPath  # Use PurePosixPath for ZIP internal paths
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(resp.content)
+            zip_path = tmp.name
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                all_names = zf.namelist()
+                print(f"[Parser] ZIP 内容: {len(all_names)} 个文件")
+
+                # 优先查找结构化 JSON（layout/*.json），其次用 markdown 转 content_list
+                layout_jsons = sorted(
+                    [n for n in all_names if n.endswith(".json") and "layout" in n.lower()],
+                )
+                if layout_jsons:
+                    # 有 layout JSON，合并所有页的结构信息
+                    content_list = self._layout_json_to_content_list(zf, layout_jsons)
+                else:
+                    # 回退：用 markdown 转 content_list
+                    md_files = [n for n in all_names if n.endswith(".md")]
+                    if not md_files:
+                        raise FileNotFoundError(
+                            f"ZIP 中未找到可解析的文件。内容: {all_names}"
+                        )
+                    content_list = self._markdown_zip_to_content_list(zf, md_files)
+
+                print(f"[Parser] 输出 {len(content_list)} 个 block")
+                return content_list
+        finally:
+            Path(zip_path).unlink(missing_ok=True)
+
+    def _layout_json_to_content_list(
+        self, zf, layout_paths: list
+    ) -> List[Dict[str, Any]]:
+        """将 MinerU 云端 API 返回的 layout/*.json 转为 content_list 格式。"""
+        items = []
+        for path in layout_paths:
+            data = json.loads(zf.read(path).decode("utf-8"))
+            # layout.json 结构通常是 list，每项包含 type/text/bbox/page_idx 等
+            if isinstance(data, list):
+                for block in data:
+                    item = {"type": block.get("type", "text")}
+                    if "text" in block:
+                        item["text"] = block["text"]
+                    elif "content" in block:
+                        item["text"] = block["content"]
+                    if "page_idx" in block or "page_id" in block:
+                        item["page_idx"] = block.get("page_idx", block.get("page_id", 0))
+                    if "bbox" in block:
+                        item["bbox"] = block["bbox"]
+                    if "level" in block:
+                        item["text_level"] = block["level"]
+                    if item.get("text"):
+                        items.append(item)
+            elif isinstance(data, dict):
+                for page_blocks in data.values():
+                    if isinstance(page_blocks, list):
+                        for block in page_blocks:
+                            if isinstance(block, dict) and block.get("text"):
+                                items.append({
+                                    "type": block.get("type", "text"),
+                                    "text": block.get("text", block.get("content", "")),
+                                    "page_idx": block.get("page_idx", block.get("page_id", 0)),
+                                })
+        if not items:
+            raise RuntimeError("layout JSON 中无有效内容")
+        return items
+
+    def _markdown_zip_to_content_list(
+        self, zf, md_paths: list
+    ) -> List[Dict[str, Any]]:
+        """将 MinerU 云端 API 返回的 markdown 文件转为 content_list 格式。"""
+        # 复用 MarkdownParser 的分段逻辑
+        from rag.parser import MarkdownParser, ParserConfig as _PC
+        import tempfile
+        import os
+
+        # 合并所有 md 文件
+        full_md = ""
+        for path in sorted(md_paths):
+            full_md += zf.read(path).decode("utf-8") + "\n\n"
+
+        # 使用 MarkdownParser 的内部方法
+        mp = MarkdownParser.__new__(MarkdownParser)
+        mp.config = self.config
+        return mp._md_to_content_list(full_md)
+
+    @staticmethod
+    def _raise_api_error(prefix: str, resp) -> None:
+        detail = ""
+        try:
+            detail = resp.json().get("msg", resp.text[:300])
+        except Exception:
+            detail = resp.text[:300]
+        raise RuntimeError(f"{prefix} ({resp.status_code}): {detail}")
 
 
 # ── PPTX 解析器 ───────────────────────────────────────────
