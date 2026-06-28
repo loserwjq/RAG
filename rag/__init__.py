@@ -5,7 +5,7 @@ RAG Pipeline — 分层解耦架构，支持多用户知识库。
     config     - 统一配置管理
     database   - SQLite 业务数据库（用户、知识库、文档记录）
     auth       - 用户认证（密码哈希 + JWT / Dev Mode）
-    parser     - 文件解析 (PDF/DOCX/PPTX/XLSX/MD)
+    parser     - 文件解析 (PDF/DOCX/PPTX/XLSX/MD/图片)
     chunker    - 智能语义切块
     embedder   - bge-m3 向量化 (Dense + Sparse)
     store      - ChromaDB 向量库
@@ -25,16 +25,10 @@ RAG Pipeline — 分层解耦架构，支持多用户知识库。
 def __getattr__(name):
     """惰性导入，避免 import rag 时立即加载重型依赖。"""
     _lazy = {
-        # 核心模块
         "Pipeline": "rag.pipeline",
         "Database": "rag.database",
         "KBManager": "rag.kb_manager",
         "AuthManager": "rag.auth",
-        # LangChain 适配器
-        "BGEHybridEmbeddings": "rag.lc_embeddings",
-        "RAGDocumentLoader": "rag.lc_loader",
-        "HybridChunkTextSplitter": "rag.lc_splitter",
-        "HybridRetriever": "rag.lc_retriever",
     }
     if name in _lazy:
         import importlib
@@ -46,6 +40,4 @@ def __getattr__(name):
 
 __all__ = [
     "Pipeline", "Database", "KBManager", "AuthManager",
-    "BGEHybridEmbeddings", "RAGDocumentLoader",
-    "HybridChunkTextSplitter", "HybridRetriever",
 ]

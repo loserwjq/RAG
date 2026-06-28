@@ -226,24 +226,33 @@ class PDFParser(BaseParser):
                 all_names = zf.namelist()
                 print(f"[Parser] ZIP 内容: {len(all_names)} 个文件")
 
-                # 优先查找结构化 JSON（layout/*.json），其次用 markdown 转 content_list
-                layout_jsons = sorted(
-                    [n for n in all_names if n.endswith(".json") and "layout" in n.lower()],
-                )
-                if layout_jsons:
-                    # 有 layout JSON，合并所有页的结构信息
-                    content_list = self._layout_json_to_content_list(zf, layout_jsons)
-                else:
-                    # 回退：用 markdown 转 content_list
+                # 优先使用 full.md（VLM 模型输出，最可靠）
+                md_text = None
+                for name in all_names:
+                    if name == "full.md" or (name.endswith(".md") and "full" in name.lower()):
+                        md_text = zf.read(name).decode("utf-8")
+                        break
+                if not md_text:
                     md_files = [n for n in all_names if n.endswith(".md")]
-                    if not md_files:
-                        raise FileNotFoundError(
-                            f"ZIP 中未找到可解析的文件。内容: {all_names}"
-                        )
-                    content_list = self._markdown_zip_to_content_list(zf, md_files)
+                    if md_files:
+                        md_text = zf.read(md_files[0]).decode("utf-8")
 
-                print(f"[Parser] 输出 {len(content_list)} 个 block")
-                return content_list
+                if md_text:
+                    content_list = MinerUCloudParser._md_to_content_list(
+                        MinerUCloudParser.__new__(MinerUCloudParser), md_text
+                    )
+                    print(f"[Parser] 输出 {len(content_list)} 个 block (via full.md)")
+                    return content_list
+
+                # 回退到 content_list.json
+                for name in all_names:
+                    if name.endswith("_content_list.json") and "v2" not in name.lower():
+                        content_list = json.loads(zf.read(name).decode("utf-8"))
+                        if isinstance(content_list, list):
+                            print(f"[Parser] 输出 {len(content_list)} 个 block (via content_list.json)")
+                            return content_list
+
+                raise FileNotFoundError(f"ZIP 中未找到可解析内容: {all_names[:10]}")
         finally:
             Path(zip_path).unlink(missing_ok=True)
 
@@ -313,108 +322,272 @@ class PDFParser(BaseParser):
         raise RuntimeError(f"{prefix} ({resp.status_code}): {detail}")
 
 
-# ── PPTX 解析器 ───────────────────────────────────────────
+# ── 通用云端解析器（MinerU Cloud API）──────────────────
 
-@register_parser([".ppt"])
+_CLOUD_API_BASE = "https://mineru.net/api/v4"
+
+# MinerU Cloud API 支持的所有格式
+_CLOUD_EXTENSIONS = [
+    ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".html", ".htm",
+]
+
+
+class MinerUCloudParser(BaseParser):
+    """通过 MinerU 云端 API 解析文档/图片，统一输出 content_list。
+
+    支持: DOC/DOCX/PPT/PPTX/XLS/XLSX/图片/HTML
+    流程: 申请预签名URL → PUT上传 → 轮询 → 下载ZIP → 提取 full.md → 转 content_list
+    """
+
+    def parse(self, file_path: Path) -> List[Dict[str, Any]]:
+        token = self.config.mineru_api_token
+        if not token:
+            raise ValueError(
+                "MinerU Cloud API 需要 token，请在 .env 中设置 RAG_MINERU_API_TOKEN\n"
+                "获取地址: https://mineru.net/apiManage/token"
+            )
+
+        import tempfile
+        import zipfile
+
+        import httpx
+
+        stem = file_path.stem
+        size_kb = file_path.stat().st_size / 1024
+        ext = file_path.suffix.lower()
+        print(f"[Parser] {ext} (Cloud): {file_path.name} ({size_kb:.0f} KB)")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        t0 = time.time()
+
+        # ── Step 1: 申请预签名上传 URL ──
+        print(f"[Parser]  Step 1/4: 申请上传链接...")
+        body = {
+            "files": [{"name": file_path.name}],
+            "model_version": self.config.mineru_model_version,
+            "enable_formula": self.config.formula_enable,
+            "enable_table": self.config.table_enable,
+            "language": self.config.lang,
+        }
+        resp = httpx.post(
+            f"{_CLOUD_API_BASE}/file-urls/batch",
+            headers=headers, json=body, timeout=30,
+        )
+        if resp.status_code != 200:
+            self._api_error("申请上传链接失败", resp)
+        result = resp.json()
+        if result.get("code") != 0:
+            raise RuntimeError(f"申请上传链接失败: {result.get('msg', result)}")
+
+        batch_id = result["data"]["batch_id"]
+        file_urls = result["data"]["file_urls"]
+        print(f"[Parser]  batch_id={batch_id}")
+
+        # ── Step 2: PUT 上传 ──
+        print(f"[Parser]  Step 2/4: 上传文件...")
+        file_bytes = file_path.read_bytes()
+        for upload_url in file_urls:
+            put_resp = httpx.put(upload_url, content=file_bytes, timeout=120)
+            if put_resp.status_code != 200:
+                raise RuntimeError(f"上传失败 ({put_resp.status_code}): {put_resp.text[:200]}")
+        print(f"[Parser]  上传完成 ({len(file_bytes)/1024:.0f} KB)")
+
+        # ── Step 3: 轮询 ──
+        print(f"[Parser]  Step 3/4: 等待解析...")
+        poll_url = f"{_CLOUD_API_BASE}/extract-results/batch/{batch_id}"
+        max_wait = 600
+        interval = 3.0
+        waited = 0.0
+
+        while waited < max_wait:
+            import time as _time
+            _time.sleep(interval)
+            waited += interval
+
+            resp = httpx.get(poll_url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                self._api_error("查询任务状态失败", resp)
+            result = resp.json()
+            if result.get("code") != 0:
+                raise RuntimeError(f"查询失败: {result.get('msg')}")
+
+            extract_results = result["data"].get("extract_result", [])
+            if not extract_results:
+                continue
+
+            state = extract_results[0].get("state")
+            if state == "done":
+                full_zip_url = extract_results[0].get("full_zip_url")
+                if not full_zip_url:
+                    raise RuntimeError("解析完成但未返回 full_zip_url")
+                break
+            elif state == "failed":
+                raise RuntimeError(f"解析失败: {extract_results[0].get('err_msg', '未知')}")
+            else:
+                progress = extract_results[0].get("extract_progress", {})
+                if progress:
+                    print(f"[Parser]  进度: {progress.get('extracted_pages','?')}/"
+                          f"{progress.get('total_pages','?')} 页, 状态={state}")
+
+        if waited >= max_wait:
+            raise RuntimeError(f"解析超时 ({max_wait}s)")
+
+        elapsed = time.time() - t0
+        print(f"[Parser]  解析完成 ({elapsed:.1f}s)")
+
+        # ── Step 4: 下载 ZIP，提取 full.md → content_list ──
+        print(f"[Parser]  Step 4/4: 下载结果...")
+        resp = httpx.get(full_zip_url, timeout=60)
+        if resp.status_code != 200:
+            raise RuntimeError(f"下载结果失败: {resp.status_code}")
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp.write(resp.content)
+            zip_path = tmp.name
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                # 优先使用 full.md（VLM 模型输出，最可靠）
+                md_text = None
+                for name in zf.namelist():
+                    if name == "full.md" or (name.endswith(".md") and "full" in name.lower()):
+                        md_text = zf.read(name).decode("utf-8")
+                        break
+                # 回退到任意 .md 文件
+                if not md_text:
+                    md_files = [n for n in zf.namelist() if n.endswith(".md")]
+                    if md_files:
+                        md_text = zf.read(md_files[0]).decode("utf-8")
+
+                if md_text:
+                    content_list = self._md_to_content_list(md_text)
+                    print(f"[Parser] 输出 {len(content_list)} 个 block (via full.md)")
+                    return content_list
+
+                # 最后回退到 content_list.json
+                for name in zf.namelist():
+                    if name.endswith("_content_list.json") and "v2" not in name.lower():
+                        content_list = json.loads(zf.read(name).decode("utf-8"))
+                        if isinstance(content_list, list):
+                            print(f"[Parser] 输出 {len(content_list)} 个 block (via content_list.json)")
+                            return content_list
+
+                raise FileNotFoundError(f"ZIP 中未找到可解析的内容: {zf.namelist()[:10]}")
+        finally:
+            Path(zip_path).unlink(missing_ok=True)
+
+    def _md_to_content_list(self, md_text: str) -> List[Dict[str, Any]]:
+        """将 Markdown 文本转为 content_list 格式。"""
+        items: List[Dict[str, Any]] = []
+        blocks = re.split(r'\n\s*\n', md_text.strip())
+
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if not lines:
+                continue
+
+            first = lines[0].strip()
+            m = _HEADING_RE.match(first)
+            if m:
+                level = len(m.group(1))
+                text = m.group(2).strip()
+                items.append({"type": "text", "text": text, "text_level": level,
+                              "page_idx": 0, "bbox": [0, 0, 0, 0]})
+                rest = '\n'.join(lines[1:]).strip()
+                if rest:
+                    items.append({"type": "text", "text": rest,
+                                  "page_idx": 0, "bbox": [0, 0, 0, 0]})
+            else:
+                items.append({"type": "text", "text": block.strip(),
+                              "page_idx": 0, "bbox": [0, 0, 0, 0]})
+
+        return items
+
+    @staticmethod
+    def _api_error(prefix: str, resp) -> None:
+        detail = ""
+        try:
+            detail = resp.json().get("msg", resp.text[:300])
+        except Exception:
+            detail = resp.text[:300]
+        raise RuntimeError(f"{prefix} ({resp.status_code}): {detail}")
+
+
+# ── 注册云端解析器 ──────────────────────────────────────
+
+for _ext in _CLOUD_EXTENSIONS:
+    _PARSERS[_ext] = MinerUCloudParser
+
+
+# ═══════════════════════════════════════════════════════════════
+# 以下为本地解析器（mineru_mode="local" 时使用，保留备用）
+# ═══════════════════════════════════════════════════════════════
+
+# ── PPT 本地解析器（备用）────────────────────────────────
+
 class PPTParser(BaseParser):
-    """解析旧版 .ppt（二进制格式），通过 COM/ LibreOffice 转为 .pptx 后解析。"""
+    """[备用] 解析旧版 .ppt，通过 COM/LibreOffice 转为 .pptx 后解析。"""
 
     def parse(self, file_path: Path) -> List[Dict[str, Any]]:
         import subprocess
         import tempfile
-        import os
         import platform
 
         size_kb = file_path.stat().st_size / 1024
         print(f"[Parser] PPT (legacy): {file_path.name} ({size_kb:.0f} KB)")
-
-        # 创建临时 .pptx 文件
         tmp_dir = tempfile.mkdtemp(prefix="ppt_convert_")
         pptx_path = Path(tmp_dir) / f"{file_path.stem}.pptx"
-
         try:
             if platform.system() == "Windows":
                 self._convert_via_com(file_path, pptx_path)
             else:
                 self._convert_via_libreoffice(file_path, pptx_path)
-
-            # 委托 PPTXParser 解析
             pptx_parser = PPTXParser(self.config)
             return pptx_parser.parse(pptx_path)
-
         finally:
-            # 清理临时文件
             import shutil
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def _convert_via_com(self, source: Path, target: Path):
-        """Windows: 通过 PowerPoint COM 自动化转换。"""
+    def _convert_via_com(self, source, target):
         import subprocess
-
         ps1 = Path(__file__).parent / "convert_ppt.ps1"
         result = subprocess.run(
-            [
-                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(ps1),
-                "-SourceFile", str(source.resolve()),
-                "-TargetFile", str(target.resolve()),
-            ],
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "-SourceFile", str(source.resolve()),
+             "-TargetFile", str(target.resolve())],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0 or not target.exists():
-            err = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(
-                f"PPT 转换失败（需要安装 PowerPoint）。\n"
-                f"请手动将 .ppt 另存为 .pptx 格式后再上传。\n"
-                f"错误详情: {err[:500]}"
-            )
+            raise RuntimeError(f"PPT 转换失败: {result.stderr[:300]}")
         print(f"[Parser] PPT → PPTX 转换成功")
 
-    def _convert_via_libreoffice(self, source: Path, target: Path):
-        """非 Windows: 通过 LibreOffice CLI 转换。"""
-        import subprocess
-
-        src = str(source.resolve())
-        outdir = str(target.parent.resolve())
+    def _convert_via_libreoffice(self, source, target):
+        import subprocess, shutil
         result = subprocess.run(
-            [
-                "libreoffice", "--headless", "--convert-to", "pptx",
-                "--outdir", outdir, src,
-            ],
+            ["libreoffice", "--headless", "--convert-to", "pptx",
+             "--outdir", str(target.parent.resolve()), str(source.resolve())],
             capture_output=True, text=True, timeout=120,
         )
-        # LibreOffice names output as <stem>.pptx automatically
         auto_name = target.parent / f"{source.stem}.pptx"
         if result.returncode != 0 or not auto_name.exists():
-            err = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(
-                f"PPT 转换失败（需要安装 LibreOffice）。\n"
-                f"请手动将 .ppt 另存为 .pptx 格式后再上传。\n"
-                f"错误详情: {err[:500]}"
-            )
-        # Rename to expected target path
+            raise RuntimeError(f"PPT 转换失败: {result.stderr[:300]}")
         if auto_name != target:
-            import shutil
             shutil.move(str(auto_name), str(target))
         print(f"[Parser] PPT → PPTX 转换成功 (LibreOffice)")
 
 
-@register_parser([".pptx"])
 class PPTXParser(BaseParser):
-    """使用 python-pptx 解析 PowerPoint 文件。"""
+    """[备用] 使用 python-pptx 解析 PowerPoint 文件。"""
 
     def parse(self, file_path: Path) -> List[Dict[str, Any]]:
         from pptx import Presentation
-
-        size_kb = file_path.stat().st_size / 1024
-        print(f"[Parser] PPTX: {file_path.name} ({size_kb:.0f} KB)")
-
         prs = Presentation(str(file_path))
-        items: List[Dict[str, Any]] = []
-
+        items = []
         for slide_idx, slide in enumerate(prs.slides):
             slide_texts = []
             for shape in slide.shapes:
@@ -424,86 +597,46 @@ class PPTXParser(BaseParser):
                         if text:
                             slide_texts.append(text)
                 if shape.has_table:
-                    table = shape.table
                     rows_data = []
-                    for row in table.rows:
+                    for row in shape.table.rows:
                         row_data = [cell.text.strip() for cell in row.cells]
                         rows_data.append(" | ".join(row_data))
                     table_text = "\n".join(rows_data)
                     if table_text.strip():
-                        items.append({
-                            "type": "table",
-                            "text": table_text,
-                            "page_idx": slide_idx,
-                            "bbox": [0, 0, 0, 0],
-                        })
-
+                        items.append({"type": "table", "text": table_text,
+                                      "page_idx": slide_idx, "bbox": [0,0,0,0]})
             if slide_texts:
-                # 第一行作为标题
-                items.append({
-                    "type": "text",
-                    "text": slide_texts[0],
-                    "text_level": 2,
-                    "page_idx": slide_idx,
-                    "bbox": [0, 0, 0, 0],
-                })
+                items.append({"type": "text", "text": slide_texts[0], "text_level": 2,
+                              "page_idx": slide_idx, "bbox": [0,0,0,0]})
                 if len(slide_texts) > 1:
-                    items.append({
-                        "type": "text",
-                        "text": "\n".join(slide_texts[1:]),
-                        "page_idx": slide_idx,
-                        "bbox": [0, 0, 0, 0],
-                    })
-
+                    items.append({"type": "text", "text": "\n".join(slide_texts[1:]),
+                                  "page_idx": slide_idx, "bbox": [0,0,0,0]})
         print(f"[Parser] 输出 {len(items)} 个 block")
         return items
 
 
-# ── DOCX 解析器 ───────────────────────────────────────────
-
-@register_parser([".docx"])
 class DOCXParser(BaseParser):
-    """使用 python-docx 解析 Word 文件。"""
+    """[备用] 使用 python-docx 解析 Word 文件。"""
 
     def parse(self, file_path: Path) -> List[Dict[str, Any]]:
         from docx import Document
-
-        size_kb = file_path.stat().st_size / 1024
-        print(f"[Parser] DOCX: {file_path.name} ({size_kb:.0f} KB)")
-
         doc = Document(str(file_path))
-        items: List[Dict[str, Any]] = []
-
+        items = []
         for para in doc.paragraphs:
             text = para.text.strip()
             if not text:
                 continue
-
-            # 根据段落样式判断标题级别
             style_name = (para.style.name or "").lower()
             if "heading" in style_name:
-                # 提取标题级别 (Heading 1 → 1, Heading 2 → 2, ...)
                 level = 1
                 for ch in style_name:
                     if ch.isdigit():
                         level = int(ch)
                         break
-                items.append({
-                    "type": "text",
-                    "text": text,
-                    "text_level": level,
-                    "page_idx": 0,
-                    "bbox": [0, 0, 0, 0],
-                })
+                items.append({"type": "text", "text": text, "text_level": level,
+                              "page_idx": 0, "bbox": [0,0,0,0]})
             else:
-                items.append({
-                    "type": "text",
-                    "text": text,
-                    "page_idx": 0,
-                    "bbox": [0, 0, 0, 0],
-                })
-
-        # 解析表格
+                items.append({"type": "text", "text": text, "page_idx": 0, "bbox": [0,0,0,0]})
         for table in doc.tables:
             rows_data = []
             for row in table.rows:
@@ -511,59 +644,30 @@ class DOCXParser(BaseParser):
                 rows_data.append(" | ".join(row_data))
             table_text = "\n".join(rows_data)
             if table_text.strip():
-                items.append({
-                    "type": "table",
-                    "text": table_text,
-                    "page_idx": 0,
-                    "bbox": [0, 0, 0, 0],
-                })
-
+                items.append({"type": "table", "text": table_text, "page_idx": 0, "bbox": [0,0,0,0]})
         print(f"[Parser] 输出 {len(items)} 个 block")
         return items
 
 
-# ── Excel 解析器 ──────────────────────────────────────────
-
-@register_parser([".xlsx", ".xls"])
 class ExcelParser(BaseParser):
-    """使用 openpyxl 解析 Excel 文件。"""
+    """[备用] 使用 openpyxl 解析 Excel 文件。"""
 
     def parse(self, file_path: Path) -> List[Dict[str, Any]]:
         from openpyxl import load_workbook
-
-        size_kb = file_path.stat().st_size / 1024
-        print(f"[Parser] Excel: {file_path.name} ({size_kb:.0f} KB)")
-
         wb = load_workbook(str(file_path), read_only=True, data_only=True)
-        items: List[Dict[str, Any]] = []
-
+        items = []
         for sheet_idx, sheet_name in enumerate(wb.sheetnames):
             ws = wb[sheet_name]
-
-            # Sheet 名作为标题
-            items.append({
-                "type": "text",
-                "text": f"工作表: {sheet_name}",
-                "text_level": 2,
-                "page_idx": sheet_idx,
-                "bbox": [0, 0, 0, 0],
-            })
-
-            # 将表格内容转为文本
+            items.append({"type": "text", "text": f"工作表: {sheet_name}", "text_level": 2,
+                          "page_idx": sheet_idx, "bbox": [0,0,0,0]})
             rows_data = []
             for row in ws.iter_rows(values_only=True):
                 row_text = [str(cell) if cell is not None else "" for cell in row]
                 if any(cell.strip() for cell in row_text):
                     rows_data.append(" | ".join(row_text))
-
             if rows_data:
-                items.append({
-                    "type": "table",
-                    "text": "\n".join(rows_data),
-                    "page_idx": sheet_idx,
-                    "bbox": [0, 0, 0, 0],
-                })
-
+                items.append({"type": "table", "text": "\n".join(rows_data),
+                              "page_idx": sheet_idx, "bbox": [0,0,0,0]})
         wb.close()
         print(f"[Parser] 输出 {len(items)} 个 block")
         return items

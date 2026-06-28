@@ -69,7 +69,12 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PREVIEW_DIR = BASE_DIR / "output" / "_previews"
 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
-ALLOWED_EXTENSIONS = {".pdf", ".ppt", ".pptx", ".docx", ".xlsx", ".xls", ".md", ".txt", ".markdown"}
+ALLOWED_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".html", ".htm",
+    ".md", ".markdown", ".txt",
+}
 PREVIEWABLE_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 OFFICE_EXTENSIONS = {".docx", ".ppt", ".pptx", ".xlsx", ".xls"}
 
@@ -1194,15 +1199,24 @@ async def supported_formats():
     return {
         "formats": sorted(ALLOWED_EXTENSIONS),
         "description": {
-            ".pdf": "PDF 文档（MinerU 解析）",
-            ".ppt": "PowerPoint 演示文稿（旧版，自动转换）",
-            ".pptx": "PowerPoint 演示文稿",
-            ".docx": "Word 文档",
-            ".xlsx": "Excel 表格",
-            ".xls": "Excel 表格（旧版）",
-            ".md": "Markdown 文档",
-            ".txt": "纯文本文件",
-            ".markdown": "Markdown 文档",
+            ".pdf": "PDF 文档（MinerU Cloud 解析）",
+            ".doc": "Word 文档（旧版，MinerU Cloud 解析）",
+            ".docx": "Word 文档（MinerU Cloud 解析）",
+            ".ppt": "PowerPoint 演示文稿（旧版，MinerU Cloud 解析）",
+            ".pptx": "PowerPoint 演示文稿（MinerU Cloud 解析）",
+            ".xls": "Excel 表格（旧版，MinerU Cloud 解析）",
+            ".xlsx": "Excel 表格（MinerU Cloud 解析）",
+            ".jpg": "图片（MinerU Cloud OCR）",
+            ".jpeg": "图片（MinerU Cloud OCR）",
+            ".png": "图片（MinerU Cloud OCR）",
+            ".gif": "图片（MinerU Cloud OCR）",
+            ".bmp": "图片（MinerU Cloud OCR）",
+            ".webp": "图片（MinerU Cloud OCR）",
+            ".html": "网页（MinerU Cloud 解析）",
+            ".htm": "网页（MinerU Cloud 解析）",
+            ".md": "Markdown 文档（本地解析）",
+            ".txt": "纯文本文件（本地解析）",
+            ".markdown": "Markdown 文档（本地解析）",
         }
     }
 
